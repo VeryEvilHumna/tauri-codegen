@@ -1,4 +1,5 @@
-use crate::parser::{RustEnum, RustStruct, VariantData};
+use crate::models::{RustEnum, RustStruct, VariantData};
+use crate::utils::to_camel_case;
 
 use super::{type_mapper::rust_to_typescript, GeneratorContext};
 
@@ -34,19 +35,22 @@ fn generate_interface(s: &RustStruct, ctx: &GeneratorContext) -> String {
     let mut output = String::new();
 
     let interface_name = ctx.format_type_name(&s.name);
-    
+
     // Add generic parameters if present
     let generics_str = if s.generics.is_empty() {
         String::new()
     } else {
         format!("<{}>", s.generics.join(", "))
     };
-    
-    output.push_str(&format!("export interface {}{} {{\n", interface_name, generics_str));
+
+    output.push_str(&format!(
+        "export interface {}{} {{\n",
+        interface_name, generics_str
+    ));
 
     for field in &s.fields {
         let ts_type = rust_to_typescript(&field.ty, ctx);
-        let field_name = to_camel_case_field(&field.name);
+        let field_name = to_camel_case(&field.name);
         output.push_str(&format!("  {}: {};\n", field_name, ts_type));
     }
 
@@ -62,7 +66,10 @@ fn generate_enum_type(e: &RustEnum, ctx: &GeneratorContext) -> String {
     let type_name = ctx.format_type_name(&e.name);
 
     // Check if this is a simple enum (all unit variants)
-    let is_simple = e.variants.iter().all(|v| matches!(v.data, VariantData::Unit));
+    let is_simple = e
+        .variants
+        .iter()
+        .all(|v| matches!(v.data, VariantData::Unit));
 
     if is_simple {
         // Generate as string union type
@@ -107,7 +114,7 @@ fn generate_enum_type(e: &RustEnum, ctx: &GeneratorContext) -> String {
                         .iter()
                         .map(|f| {
                             let ts_type = rust_to_typescript(&f.ty, ctx);
-                            format!("{}: {}", to_camel_case_field(&f.name), ts_type)
+                            format!("{}: {}", to_camel_case(&f.name), ts_type)
                         })
                         .collect();
 
@@ -130,37 +137,26 @@ fn generate_enum_type(e: &RustEnum, ctx: &GeneratorContext) -> String {
     output
 }
 
-/// Convert snake_case to camelCase for field names
-fn to_camel_case_field(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = false;
-
-    for (i, c) in s.chars().enumerate() {
-        if c == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(c.to_ascii_uppercase());
-            capitalize_next = false;
-        } else if i == 0 {
-            result.push(c.to_ascii_lowercase());
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::NamingConfig;
-    use crate::parser::{RustType, StructField};
+    use crate::models::{EnumVariant, RustType, StructField, VariantData};
+    use std::path::PathBuf;
+
+    fn test_path() -> PathBuf {
+        PathBuf::from("test.rs")
+    }
+
+    fn default_ctx() -> GeneratorContext {
+        GeneratorContext::new(NamingConfig::default())
+    }
 
     #[test]
     fn test_generate_simple_interface() {
         let s = RustStruct {
             name: "User".to_string(),
+            generics: vec![],
             fields: vec![
                 StructField {
                     name: "id".to_string(),
@@ -171,14 +167,296 @@ mod tests {
                     ty: RustType::Primitive("String".to_string()),
                 },
             ],
+            source_file: test_path(),
         };
 
-        let ctx = GeneratorContext::new(NamingConfig::default());
+        let ctx = default_ctx();
         let output = generate_interface(&s, &ctx);
 
         assert!(output.contains("export interface User"));
         assert!(output.contains("id: number"));
         assert!(output.contains("name: string"));
     }
-}
 
+    #[test]
+    fn test_generate_interface_with_generics() {
+        let s = RustStruct {
+            name: "Wrapper".to_string(),
+            generics: vec!["T".to_string()],
+            fields: vec![
+                StructField {
+                    name: "data".to_string(),
+                    ty: RustType::Generic("T".to_string()),
+                },
+                StructField {
+                    name: "count".to_string(),
+                    ty: RustType::Primitive("i32".to_string()),
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("export interface Wrapper<T>"));
+        assert!(output.contains("data: T"));
+        assert!(output.contains("count: number"));
+    }
+
+    #[test]
+    fn test_generate_interface_with_multiple_generics() {
+        let s = RustStruct {
+            name: "Pair".to_string(),
+            generics: vec!["K".to_string(), "V".to_string()],
+            fields: vec![
+                StructField {
+                    name: "key".to_string(),
+                    ty: RustType::Generic("K".to_string()),
+                },
+                StructField {
+                    name: "value".to_string(),
+                    ty: RustType::Generic("V".to_string()),
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("export interface Pair<K, V>"));
+    }
+
+    #[test]
+    fn test_generate_simple_enum() {
+        let e = RustEnum {
+            name: "Status".to_string(),
+            variants: vec![
+                EnumVariant {
+                    name: "Active".to_string(),
+                    data: VariantData::Unit,
+                },
+                EnumVariant {
+                    name: "Inactive".to_string(),
+                    data: VariantData::Unit,
+                },
+                EnumVariant {
+                    name: "Pending".to_string(),
+                    data: VariantData::Unit,
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_enum_type(&e, &ctx);
+
+        assert!(output.contains("export type Status ="));
+        assert!(output.contains("\"Active\""));
+        assert!(output.contains("\"Inactive\""));
+        assert!(output.contains("\"Pending\""));
+    }
+
+    #[test]
+    fn test_generate_complex_enum_with_tuple() {
+        let e = RustEnum {
+            name: "Message".to_string(),
+            variants: vec![
+                EnumVariant {
+                    name: "Text".to_string(),
+                    data: VariantData::Tuple(vec![RustType::Primitive("String".to_string())]),
+                },
+                EnumVariant {
+                    name: "Number".to_string(),
+                    data: VariantData::Tuple(vec![RustType::Primitive("i32".to_string())]),
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_enum_type(&e, &ctx);
+
+        assert!(output.contains("export type Message ="));
+        assert!(output.contains("type: \"Text\""));
+        assert!(output.contains("value0: string"));
+        assert!(output.contains("type: \"Number\""));
+        assert!(output.contains("value0: number"));
+    }
+
+    #[test]
+    fn test_generate_complex_enum_with_struct() {
+        let e = RustEnum {
+            name: "UserRole".to_string(),
+            variants: vec![
+                EnumVariant {
+                    name: "Admin".to_string(),
+                    data: VariantData::Struct(vec![StructField {
+                        name: "permissions".to_string(),
+                        ty: RustType::Vec(Box::new(RustType::Primitive("String".to_string()))),
+                    }]),
+                },
+                EnumVariant {
+                    name: "User".to_string(),
+                    data: VariantData::Unit,
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_enum_type(&e, &ctx);
+
+        assert!(output.contains("type: \"Admin\""));
+        assert!(output.contains("permissions: string[]"));
+        assert!(output.contains("type: \"User\""));
+    }
+
+    #[test]
+    fn test_camel_case_field_names() {
+        let s = RustStruct {
+            name: "User".to_string(),
+            generics: vec![],
+            fields: vec![
+                StructField {
+                    name: "user_id".to_string(),
+                    ty: RustType::Primitive("i32".to_string()),
+                },
+                StructField {
+                    name: "first_name".to_string(),
+                    ty: RustType::Primitive("String".to_string()),
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("userId: number"));
+        assert!(output.contains("firstName: string"));
+    }
+
+    #[test]
+    fn test_generate_empty_struct() {
+        let s = RustStruct {
+            name: "Empty".to_string(),
+            generics: vec![],
+            fields: vec![],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("export interface Empty"));
+        assert!(output.contains("{\n}\n"));
+    }
+
+    #[test]
+    fn test_generate_types_file_header() {
+        let output = generate_types_file(&[], &[], &default_ctx());
+
+        assert!(output.contains("// This file was auto-generated by tauri-codegen"));
+        assert!(output.contains("// Do not edit this file manually"));
+    }
+
+    #[test]
+    fn test_generate_multiple_types() {
+        let structs = vec![
+            RustStruct {
+                name: "User".to_string(),
+                generics: vec![],
+                fields: vec![StructField {
+                    name: "id".to_string(),
+                    ty: RustType::Primitive("i32".to_string()),
+                }],
+                source_file: test_path(),
+            },
+            RustStruct {
+                name: "Item".to_string(),
+                generics: vec![],
+                fields: vec![StructField {
+                    name: "name".to_string(),
+                    ty: RustType::Primitive("String".to_string()),
+                }],
+                source_file: test_path(),
+            },
+        ];
+
+        let enums = vec![RustEnum {
+            name: "Status".to_string(),
+            variants: vec![
+                EnumVariant {
+                    name: "Active".to_string(),
+                    data: VariantData::Unit,
+                },
+            ],
+            source_file: test_path(),
+        }];
+
+        let ctx = default_ctx();
+        let output = generate_types_file(&structs, &enums, &ctx);
+
+        assert!(output.contains("export interface User"));
+        assert!(output.contains("export interface Item"));
+        assert!(output.contains("export type Status"));
+    }
+
+    #[test]
+    fn test_type_with_option_field() {
+        let s = RustStruct {
+            name: "User".to_string(),
+            generics: vec![],
+            fields: vec![StructField {
+                name: "email".to_string(),
+                ty: RustType::Option(Box::new(RustType::Primitive("String".to_string()))),
+            }],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("email: string | null"));
+    }
+
+    #[test]
+    fn test_type_with_vec_field() {
+        let s = RustStruct {
+            name: "User".to_string(),
+            generics: vec![],
+            fields: vec![StructField {
+                name: "tags".to_string(),
+                ty: RustType::Vec(Box::new(RustType::Primitive("String".to_string()))),
+            }],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("tags: string[]"));
+    }
+
+    #[test]
+    fn test_naming_prefix() {
+        let s = RustStruct {
+            name: "User".to_string(),
+            generics: vec![],
+            fields: vec![],
+            source_file: test_path(),
+        };
+
+        let ctx = GeneratorContext::new(NamingConfig {
+            type_prefix: "I".to_string(),
+            type_suffix: "".to_string(),
+            function_prefix: "".to_string(),
+            function_suffix: "".to_string(),
+        });
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("export interface IUser"));
+    }
+}

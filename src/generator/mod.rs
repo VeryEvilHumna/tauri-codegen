@@ -32,7 +32,10 @@ impl GeneratorContext {
 
     /// Apply naming configuration to a type name
     pub fn format_type_name(&self, name: &str) -> String {
-        format!("{}{}{}", self.naming.type_prefix, name, self.naming.type_suffix)
+        format!(
+            "{}{}{}",
+            self.naming.type_prefix, name, self.naming.type_suffix
+        )
     }
 
     /// Apply naming configuration to a function name
@@ -43,4 +46,3 @@ impl GeneratorContext {
         )
     }
 }
-

@@ -1,0 +1,431 @@
+use crate::models::{CommandArg, RustType, TauriCommand};
+use anyhow::Result;
+use std::path::Path;
+use syn::{FnArg, ItemFn, ReturnType, Type};
+
+use super::type_extractor::parse_type;
+
+/// Parse a Rust source file and extract Tauri commands
+pub fn parse_commands(content: &str, source_file: &Path) -> Result<Vec<TauriCommand>> {
+    let syntax = syn::parse_file(content)?;
+    let mut commands = Vec::new();
+
+    for item in syntax.items {
+        match item {
+            syn::Item::Fn(ref func) => {
+                if is_tauri_command(func) {
+                    if let Some(cmd) = parse_command_fn(func, source_file) {
+                        commands.push(cmd);
+                    }
+                }
+            }
+            syn::Item::Impl(ref impl_block) => {
+                // Also check for functions inside impl blocks
+                for impl_item in &impl_block.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        if is_tauri_command_method(method) {
+                            if let Some(cmd) = parse_command_method(method, source_file) {
+                                commands.push(cmd);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(ref module) => {
+                // Check for functions inside mod blocks
+                if let Some((_, ref items)) = module.content {
+                    for mod_item in items {
+                        if let syn::Item::Fn(func) = mod_item {
+                            if is_tauri_command(func) {
+                                if let Some(cmd) = parse_command_fn(func, source_file) {
+                                    commands.push(cmd);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(commands)
+}
+
+/// Check if a function has the #[tauri::command] attribute
+fn is_tauri_command(func: &ItemFn) -> bool {
+    func.attrs.iter().any(|attr| {
+        if let syn::Meta::Path(path) = &attr.meta {
+            let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            // Check for #[tauri::command] or #[command]
+            (segments.len() == 2 && segments[0] == "tauri" && segments[1] == "command")
+                || (segments.len() == 1 && segments[0] == "command")
+        } else {
+            false
+        }
+    })
+}
+
+/// Check if a method has the #[tauri::command] attribute
+fn is_tauri_command_method(method: &syn::ImplItemFn) -> bool {
+    method.attrs.iter().any(|attr| {
+        if let syn::Meta::Path(path) = &attr.meta {
+            let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            (segments.len() == 2 && segments[0] == "tauri" && segments[1] == "command")
+                || (segments.len() == 1 && segments[0] == "command")
+        } else {
+            false
+        }
+    })
+}
+
+/// Parse a function into a TauriCommand
+fn parse_command_fn(func: &ItemFn, source_file: &Path) -> Option<TauriCommand> {
+    let name = func.sig.ident.to_string();
+
+    let args = func
+        .sig
+        .inputs
+        .iter()
+        .filter_map(parse_fn_arg)
+        .collect();
+
+    let return_type = parse_return_type(&func.sig.output);
+
+    Some(TauriCommand {
+        name,
+        args,
+        return_type,
+        source_file: source_file.to_path_buf(),
+    })
+}
+
+/// Parse a method into a TauriCommand
+fn parse_command_method(method: &syn::ImplItemFn, source_file: &Path) -> Option<TauriCommand> {
+    let name = method.sig.ident.to_string();
+
+    let args = method
+        .sig
+        .inputs
+        .iter()
+        .filter_map(parse_fn_arg)
+        .collect();
+
+    let return_type = parse_return_type(&method.sig.output);
+
+    Some(TauriCommand {
+        name,
+        args,
+        return_type,
+        source_file: source_file.to_path_buf(),
+    })
+}
+
+/// Parse a function argument
+fn parse_fn_arg(arg: &FnArg) -> Option<CommandArg> {
+    match arg {
+        FnArg::Typed(pat_type) => {
+            // Extract argument name from pattern
+            let name = match pat_type.pat.as_ref() {
+                syn::Pat::Ident(ident) => ident.ident.to_string(),
+                _ => return None,
+            };
+
+            // Skip special Tauri types like State, Window, AppHandle
+            if is_tauri_special_type(&pat_type.ty) {
+                return None;
+            }
+
+            let ty = parse_type(&pat_type.ty);
+
+            Some(CommandArg { name, ty })
+        }
+        FnArg::Receiver(_) => None, // Skip self arguments
+    }
+}
+
+/// Check if a type is a special Tauri type that should be skipped
+fn is_tauri_special_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            let name = segment.ident.to_string();
+            // These are injected by Tauri and not passed from frontend
+            return matches!(
+                name.as_str(),
+                "State" | "Window" | "AppHandle" | "Webview" | "WebviewWindow"
+            );
+        }
+    }
+    false
+}
+
+/// Parse the return type of a function
+fn parse_return_type(return_type: &ReturnType) -> Option<RustType> {
+    match return_type {
+        ReturnType::Default => None,
+        ReturnType::Type(_, ty) => {
+            let rust_type = parse_type(ty);
+            match rust_type {
+                RustType::Unit => None,
+                _ => Some(rust_type),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_path() -> PathBuf {
+        PathBuf::from("test.rs")
+    }
+
+    #[test]
+    fn test_parse_simple_command() {
+        let code = r#"
+            #[tauri::command]
+            fn greet() {
+                println!("Hello!");
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "greet");
+        assert!(commands[0].args.is_empty());
+        assert!(commands[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_parse_command_with_short_attribute() {
+        let code = r#"
+            #[command]
+            fn greet() {}
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "greet");
+    }
+
+    #[test]
+    fn test_parse_command_with_args() {
+        let code = r#"
+            #[tauri::command]
+            fn get_user(id: i32, name: String) -> User {
+                unimplemented!()
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "get_user");
+        assert_eq!(commands[0].args.len(), 2);
+        assert_eq!(commands[0].args[0].name, "id");
+        assert_eq!(commands[0].args[1].name, "name");
+    }
+
+    #[test]
+    fn test_parse_command_with_return_type() {
+        let code = r#"
+            #[tauri::command]
+            fn get_user(id: i32) -> Result<User, String> {
+                unimplemented!()
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].return_type.is_some());
+
+        match &commands[0].return_type {
+            Some(RustType::Result(inner)) => match inner.as_ref() {
+                RustType::Custom(name) => assert_eq!(name, "User"),
+                other => panic!("Expected Custom, got {:?}", other),
+            },
+            other => panic!("Expected Result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_async_command() {
+        let code = r#"
+            #[tauri::command]
+            async fn fetch_data() -> Result<Vec<Item>, String> {
+                unimplemented!()
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "fetch_data");
+        assert!(commands[0].return_type.is_some());
+    }
+
+    #[test]
+    fn test_skip_tauri_special_types() {
+        let code = r#"
+            #[tauri::command]
+            fn with_state(state: State<AppState>, window: Window, id: i32) {
+                unimplemented!()
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        // Only 'id' should be included, State and Window should be skipped
+        assert_eq!(commands[0].args.len(), 1);
+        assert_eq!(commands[0].args[0].name, "id");
+    }
+
+    #[test]
+    fn test_skip_app_handle() {
+        let code = r#"
+            #[tauri::command]
+            fn with_app(app: AppHandle, data: String) {
+                unimplemented!()
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].args.len(), 1);
+        assert_eq!(commands[0].args[0].name, "data");
+    }
+
+    #[test]
+    fn test_parse_command_in_mod() {
+        let code = r#"
+            mod commands {
+                #[tauri::command]
+                fn inner_command(id: i32) -> String {
+                    unimplemented!()
+                }
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "inner_command");
+    }
+
+    #[test]
+    fn test_parse_multiple_commands() {
+        let code = r#"
+            #[tauri::command]
+            fn command_one() {}
+
+            #[tauri::command]
+            fn command_two(id: i32) -> String {
+                unimplemented!()
+            }
+
+            #[tauri::command]
+            async fn command_three() -> Result<(), String> {
+                Ok(())
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0].name, "command_one");
+        assert_eq!(commands[1].name, "command_two");
+        assert_eq!(commands[2].name, "command_three");
+    }
+
+    #[test]
+    fn test_ignore_non_command_functions() {
+        let code = r#"
+            fn helper_function() {}
+
+            pub fn another_helper(x: i32) -> i32 {
+                x * 2
+            }
+
+            #[tauri::command]
+            fn actual_command() {}
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "actual_command");
+    }
+
+    #[test]
+    fn test_command_with_complex_types() {
+        let code = r#"
+            #[tauri::command]
+            fn complex(
+                items: Vec<Item>,
+                optional: Option<String>,
+                map: HashMap<String, i32>
+            ) -> Result<Vec<Response>, String> {
+                unimplemented!()
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].args.len(), 3);
+
+        // Check items arg
+        match &commands[0].args[0].ty {
+            RustType::Vec(_) => {}
+            other => panic!("Expected Vec, got {:?}", other),
+        }
+
+        // Check optional arg
+        match &commands[0].args[1].ty {
+            RustType::Option(_) => {}
+            other => panic!("Expected Option, got {:?}", other),
+        }
+
+        // Check map arg
+        match &commands[0].args[2].ty {
+            RustType::HashMap { .. } => {}
+            other => panic!("Expected HashMap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_void_return_is_none() {
+        let code = r#"
+            #[tauri::command]
+            fn void_command() {
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_unit_return_is_none() {
+        let code = r#"
+            #[tauri::command]
+            fn unit_command() -> () {
+            }
+        "#;
+
+        let commands = parse_commands(code, &test_path()).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].return_type.is_none());
+    }
+
+    #[test]
+    fn test_source_file_is_set() {
+        let code = r#"
+            #[tauri::command]
+            fn my_command() {}
+        "#;
+
+        let path = PathBuf::from("src/commands.rs");
+        let commands = parse_commands(code, &path).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].source_file, path);
+    }
+}
+

@@ -1,11 +1,9 @@
-use crate::parser::{RustType, TauriCommand};
+use crate::models::{CommandArg, RustType, TauriCommand};
+use crate::utils::to_camel_case;
 use std::collections::HashSet;
 use std::path::Path;
 
-use super::{
-    type_mapper::{rust_to_typescript, to_camel_case},
-    GeneratorContext,
-};
+use super::{type_mapper::rust_to_typescript, GeneratorContext};
 
 /// Generate TypeScript commands file content
 pub fn generate_commands_file(
@@ -68,11 +66,7 @@ fn collect_used_types(commands: &[TauriCommand], ctx: &GeneratorContext) -> Hash
 }
 
 /// Recursively collect custom type names from a RustType
-fn collect_types_from_rust_type(
-    ty: &RustType,
-    ctx: &GeneratorContext,
-    types: &mut HashSet<String>,
-) {
+fn collect_types_from_rust_type(ty: &RustType, ctx: &GeneratorContext, types: &mut HashSet<String>) {
     match ty {
         RustType::Custom(name) if ctx.is_custom_type(name) => {
             types.insert(ctx.format_type_name(name));
@@ -135,7 +129,7 @@ fn generate_command_function(cmd: &TauriCommand, ctx: &GeneratorContext) -> Stri
 }
 
 /// Generate TypeScript parameter list
-fn generate_params(args: &[crate::parser::CommandArg], ctx: &GeneratorContext) -> String {
+fn generate_params(args: &[CommandArg], ctx: &GeneratorContext) -> String {
     args.iter()
         .map(|arg| {
             let param_name = to_camel_case(&arg.name);
@@ -155,7 +149,7 @@ fn generate_return_type(return_type: &Option<RustType>, ctx: &GeneratorContext) 
 }
 
 /// Generate the arguments object for invoke
-fn generate_args_object(args: &[crate::parser::CommandArg]) -> String {
+fn generate_args_object(args: &[CommandArg]) -> String {
     args.iter()
         .map(|arg| {
             let param_name = to_camel_case(&arg.name);
@@ -196,7 +190,21 @@ fn calculate_relative_import(types_file: &Path, commands_file: &Path) -> String 
 mod tests {
     use super::*;
     use crate::config::NamingConfig;
-    use crate::parser::CommandArg;
+    use std::path::PathBuf;
+
+    fn test_path() -> PathBuf {
+        PathBuf::from("test.rs")
+    }
+
+    fn default_ctx() -> GeneratorContext {
+        GeneratorContext::new(NamingConfig::default())
+    }
+
+    fn ctx_with_type(type_name: &str) -> GeneratorContext {
+        let mut ctx = default_ctx();
+        ctx.register_type(type_name);
+        ctx
+    }
 
     #[test]
     fn test_generate_simple_command() {
@@ -207,9 +215,10 @@ mod tests {
                 ty: RustType::Primitive("i32".to_string()),
             }],
             return_type: Some(RustType::Custom("User".to_string())),
+            source_file: test_path(),
         };
 
-        let mut ctx = GeneratorContext::new(NamingConfig::default());
+        let mut ctx = default_ctx();
         ctx.register_type("User");
 
         let output = generate_command_function(&cmd, &ctx);
@@ -219,5 +228,254 @@ mod tests {
         assert!(output.contains("Promise<User>"));
         assert!(output.contains("invoke<User>(\"get_user\""));
     }
-}
 
+    #[test]
+    fn test_generate_command_no_args() {
+        let cmd = TauriCommand {
+            name: "get_all".to_string(),
+            args: vec![],
+            return_type: Some(RustType::Vec(Box::new(RustType::Custom("Item".to_string())))),
+            source_file: test_path(),
+        };
+
+        let ctx = ctx_with_type("Item");
+        let output = generate_command_function(&cmd, &ctx);
+
+        assert!(output.contains("export async function getAll()"));
+        assert!(output.contains("Promise<Item[]>"));
+        assert!(output.contains("invoke<Item[]>(\"get_all\")"));
+        // Should NOT have second argument to invoke
+        assert!(!output.contains("invoke<Item[]>(\"get_all\", {"));
+    }
+
+    #[test]
+    fn test_generate_command_multiple_args() {
+        let cmd = TauriCommand {
+            name: "create_user".to_string(),
+            args: vec![
+                CommandArg {
+                    name: "name".to_string(),
+                    ty: RustType::Primitive("String".to_string()),
+                },
+                CommandArg {
+                    name: "age".to_string(),
+                    ty: RustType::Primitive("i32".to_string()),
+                },
+                CommandArg {
+                    name: "email".to_string(),
+                    ty: RustType::Option(Box::new(RustType::Primitive("String".to_string()))),
+                },
+            ],
+            return_type: Some(RustType::Custom("User".to_string())),
+            source_file: test_path(),
+        };
+
+        let ctx = ctx_with_type("User");
+        let output = generate_command_function(&cmd, &ctx);
+
+        assert!(output.contains("name: string"));
+        assert!(output.contains("age: number"));
+        assert!(output.contains("email: string | null"));
+    }
+
+    #[test]
+    fn test_generate_void_return() {
+        let cmd = TauriCommand {
+            name: "delete_user".to_string(),
+            args: vec![CommandArg {
+                name: "id".to_string(),
+                ty: RustType::Primitive("i32".to_string()),
+            }],
+            return_type: None,
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_command_function(&cmd, &ctx);
+
+        assert!(output.contains("Promise<void>"));
+        assert!(output.contains("invoke<void>"));
+    }
+
+    #[test]
+    fn test_camel_case_function_name() {
+        let cmd = TauriCommand {
+            name: "get_user_by_id".to_string(),
+            args: vec![],
+            return_type: None,
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_command_function(&cmd, &ctx);
+
+        assert!(output.contains("export async function getUserById()"));
+    }
+
+    #[test]
+    fn test_snake_case_args_in_invoke() {
+        let cmd = TauriCommand {
+            name: "update".to_string(),
+            args: vec![CommandArg {
+                name: "user_id".to_string(),
+                ty: RustType::Primitive("i32".to_string()),
+            }],
+            return_type: None,
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_command_function(&cmd, &ctx);
+
+        // Param should be camelCase
+        assert!(output.contains("userId: number"));
+        // But invoke should map back to snake_case
+        assert!(output.contains("user_id: userId"));
+    }
+
+    #[test]
+    fn test_collect_used_types_from_commands() {
+        let commands = vec![
+            TauriCommand {
+                name: "get_user".to_string(),
+                args: vec![],
+                return_type: Some(RustType::Custom("User".to_string())),
+                source_file: test_path(),
+            },
+            TauriCommand {
+                name: "create".to_string(),
+                args: vec![CommandArg {
+                    name: "req".to_string(),
+                    ty: RustType::Custom("CreateRequest".to_string()),
+                }],
+                return_type: Some(RustType::Custom("User".to_string())),
+                source_file: test_path(),
+            },
+        ];
+
+        let mut ctx = default_ctx();
+        ctx.register_type("User");
+        ctx.register_type("CreateRequest");
+
+        let types = collect_used_types(&commands, &ctx);
+
+        assert!(types.contains("User"));
+        assert!(types.contains("CreateRequest"));
+        assert_eq!(types.len(), 2);
+    }
+
+    #[test]
+    fn test_collect_used_types_nested() {
+        let commands = vec![TauriCommand {
+            name: "get".to_string(),
+            args: vec![],
+            return_type: Some(RustType::Vec(Box::new(RustType::Option(Box::new(
+                RustType::Custom("User".to_string()),
+            ))))),
+            source_file: test_path(),
+        }];
+
+        let ctx = ctx_with_type("User");
+        let types = collect_used_types(&commands, &ctx);
+
+        assert!(types.contains("User"));
+    }
+
+    #[test]
+    fn test_relative_import_path_same_dir() {
+        let types_file = Path::new("src/generated/types.ts");
+        let commands_file = Path::new("src/generated/commands.ts");
+
+        let import = calculate_relative_import(types_file, commands_file);
+        assert_eq!(import, "./types");
+    }
+
+    #[test]
+    fn test_naming_function_prefix() {
+        let cmd = TauriCommand {
+            name: "get_user".to_string(),
+            args: vec![],
+            return_type: None,
+            source_file: test_path(),
+        };
+
+        let ctx = GeneratorContext::new(NamingConfig {
+            type_prefix: "".to_string(),
+            type_suffix: "".to_string(),
+            function_prefix: "api".to_string(),
+            function_suffix: "".to_string(),
+        });
+
+        let output = generate_command_function(&cmd, &ctx);
+        assert!(output.contains("export async function apigetUser"));
+    }
+
+    #[test]
+    fn test_naming_function_suffix() {
+        let cmd = TauriCommand {
+            name: "get_user".to_string(),
+            args: vec![],
+            return_type: None,
+            source_file: test_path(),
+        };
+
+        let ctx = GeneratorContext::new(NamingConfig {
+            type_prefix: "".to_string(),
+            type_suffix: "".to_string(),
+            function_prefix: "".to_string(),
+            function_suffix: "Cmd".to_string(),
+        });
+
+        let output = generate_command_function(&cmd, &ctx);
+        assert!(output.contains("export async function getUserCmd"));
+    }
+
+    #[test]
+    fn test_generate_commands_file_header() {
+        let commands: Vec<TauriCommand> = vec![];
+        let types_path = Path::new("types.ts");
+        let commands_path = Path::new("commands.ts");
+        let ctx = default_ctx();
+
+        let output = generate_commands_file(&commands, types_path, commands_path, &ctx);
+
+        assert!(output.contains("// This file was auto-generated by tauri-codegen"));
+        assert!(output.contains("// Do not edit this file manually"));
+        assert!(output.contains("import { invoke } from \"@tauri-apps/api/core\""));
+    }
+
+    #[test]
+    fn test_generate_commands_file_with_imports() {
+        let commands = vec![TauriCommand {
+            name: "get_user".to_string(),
+            args: vec![],
+            return_type: Some(RustType::Custom("User".to_string())),
+            source_file: test_path(),
+        }];
+
+        let types_path = Path::new("src/generated/types.ts");
+        let commands_path = Path::new("src/generated/commands.ts");
+        let ctx = ctx_with_type("User");
+
+        let output = generate_commands_file(&commands, types_path, commands_path, &ctx);
+
+        assert!(output.contains("import type { User } from"));
+    }
+
+    #[test]
+    fn test_complex_return_type() {
+        let cmd = TauriCommand {
+            name: "search".to_string(),
+            args: vec![],
+            return_type: Some(RustType::Result(Box::new(RustType::Vec(Box::new(
+                RustType::Custom("User".to_string()),
+            ))))),
+            source_file: test_path(),
+        };
+
+        let ctx = ctx_with_type("User");
+        let output = generate_command_function(&cmd, &ctx);
+
+        assert!(output.contains("Promise<User[]>"));
+    }
+}
