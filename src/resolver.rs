@@ -228,6 +228,19 @@ impl ModuleResolver {
     }
 
     fn resolve_path(&self, segments: &[&str], scope: &FileScope) -> ResolutionResult {
+        let first = segments[0];
+
+        // 1. Check if the first segment is an imported alias/module
+        if let Some(imported) = scope.imports.get(first) {
+            // e.g. use crate::utils::wrapper; AND path is wrapper::MyType
+            // imported.path = ["crate", "utils", "wrapper"]
+            // result path = ["crate", "utils", "wrapper", "MyType"]
+            let mut full_path = imported.path.clone();
+            full_path.extend(segments[1..].iter().map(|s| s.to_string()));
+            return self.resolve_module_path(&full_path);
+        }
+
+        // 2. Standard canonical path resolution
         let path_result = self.resolve_canonical_path(segments, scope);
         match path_result {
             Some(path) => self.resolve_module_path(&path),
@@ -357,6 +370,28 @@ mod tests {
     }
     
     #[test]
+    fn test_resolve_path_via_import() {
+        let mut resolver = ModuleResolver::new();
+
+        // Define type in a module: src/types.rs -> User
+        let types_code = "struct User;";
+        let types_path = PathBuf::from("src/types.rs");
+        resolver.parse_file(&types_path, types_code, &base_path()).unwrap();
+
+        // Usage file: imports module, uses qualified path
+        // use crate::types;
+        // ... types::User
+        let cmd_code = "use crate::types;";
+        let cmd_path = PathBuf::from("src/cmd.rs");
+        resolver.parse_file(&cmd_path, cmd_code, &base_path()).unwrap();
+
+        match resolver.resolve_type("types::User", &cmd_path) {
+            ResolutionResult::Found(p) => assert_eq!(p, types_path),
+            res => panic!("Failed to resolve types::User via import: {:?}", res),
+        }
+    }
+
+    #[test]
     fn test_resolve_ambiguous() {
         let mut resolver = ModuleResolver::new();
         
@@ -376,6 +411,82 @@ mod tests {
                 assert!(paths.contains(&path_b));
             },
             res => panic!("Expected Ambiguous, got {:?}", res),
+        }
+    }
+
+    #[test]
+    fn test_resolve_path_via_renamed_import() {
+        let mut resolver = ModuleResolver::new();
+
+        let types_path = PathBuf::from("src/long_name/types.rs");
+        resolver.parse_file(&types_path, "struct User;", &base_path()).unwrap();
+
+        // use crate::long_name::types as t;
+        // t::User
+        let cmd_code = "use crate::long_name::types as t;";
+        let cmd_path = PathBuf::from("src/cmd.rs");
+        resolver.parse_file(&cmd_path, cmd_code, &base_path()).unwrap();
+
+        match resolver.resolve_type("t::User", &cmd_path) {
+            ResolutionResult::Found(p) => assert_eq!(p, types_path),
+            res => panic!("Failed to resolve t::User via renamed import: {:?}", res),
+        }
+    }
+
+    #[test]
+    fn test_resolve_deeply_nested_path() {
+        let mut resolver = ModuleResolver::new();
+
+        let target_path = PathBuf::from("src/a/b/c/target.rs");
+        resolver.parse_file(&target_path, "struct Deep;", &base_path()).unwrap();
+
+        let cmd_path = PathBuf::from("src/main.rs");
+        resolver.parse_file(&cmd_path, "", &base_path()).unwrap();
+
+        match resolver.resolve_type("crate::a::b::c::target::Deep", &cmd_path) {
+            ResolutionResult::Found(p) => assert_eq!(p, target_path),
+            res => panic!("Failed to resolve deep path: {:?}", res),
+        }
+    }
+
+    #[test]
+    fn test_resolve_super_chain() {
+        let mut resolver = ModuleResolver::new();
+
+        let root_path = PathBuf::from("src/types.rs");
+        resolver.parse_file(&root_path, "struct Top;", &base_path()).unwrap();
+
+        let deep_path = PathBuf::from("src/a/b/c/deep.rs");
+        resolver.parse_file(&deep_path, "", &base_path()).unwrap();
+
+        // deep.rs is at crate::a::b::c::deep
+        // super -> c
+        // super -> b
+        // super -> a
+        // super -> crate
+        // super::super::super::super::types::Top
+        match resolver.resolve_type("super::super::super::super::types::Top", &deep_path) {
+            ResolutionResult::Found(p) => assert_eq!(p, root_path),
+            res => panic!("Failed to resolve super chain: {:?}", res),
+        }
+    }
+    
+    #[test]
+    fn test_resolve_sibling_via_super() {
+        let mut resolver = ModuleResolver::new();
+        
+        // src/sibling.rs -> crate::sibling
+        let sibling_path = PathBuf::from("src/sibling.rs");
+        resolver.parse_file(&sibling_path, "struct SiblingType;", &base_path()).unwrap();
+        
+        // src/current.rs -> crate::current
+        let current_path = PathBuf::from("src/current.rs");
+        resolver.parse_file(&current_path, "", &base_path()).unwrap();
+        
+        // siblings must be accessed via parent (super) if not imported
+        match resolver.resolve_type("super::sibling::SiblingType", &current_path) {
+             ResolutionResult::Found(p) => assert_eq!(p, sibling_path),
+             res => panic!("Failed to resolve sibling path via super: {:?}", res),
         }
     }
 }
