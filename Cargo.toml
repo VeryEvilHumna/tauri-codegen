@@ -1,6 +1,6 @@
 [package]
 name = "tauri-codegen"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "CLI tool to generate TypeScript bindings from Tauri commands"
 authors = ["kirillinakin <kirillinyakin@yandex.ru>"]
