@@ -27,7 +27,8 @@ pub fn generate_commands_file(
     if !used_types.is_empty() {
         // Calculate relative import path from commands file to types file
         let import_path = calculate_relative_import(types_file_path, commands_file_path);
-        let types_list: Vec<_> = used_types.into_iter().collect();
+        let mut types_list: Vec<_> = used_types.into_iter().collect();
+        types_list.sort();
         output.push_str(&format!(
             "import type {{ {} }} from \"{}\";\n",
             types_list.join(", "),
@@ -477,5 +478,40 @@ mod tests {
         let output = generate_command_function(&cmd, &ctx);
 
         assert!(output.contains("Promise<User[]>"));
+    }
+
+    #[test]
+    fn test_imports_are_sorted() {
+        let commands = vec![TauriCommand {
+            name: "test".to_string(),
+            args: vec![
+                CommandArg {
+                    name: "a".to_string(),
+                    ty: RustType::Custom("BType".to_string()),
+                },
+                CommandArg {
+                    name: "b".to_string(),
+                    ty: RustType::Custom("AType".to_string()),
+                },
+                CommandArg {
+                    name: "c".to_string(),
+                    ty: RustType::Custom("CType".to_string()),
+                },
+            ],
+            return_type: None,
+            source_file: test_path(),
+        }];
+
+        let types_path = Path::new("types.ts");
+        let commands_path = Path::new("commands.ts");
+        let mut ctx = default_ctx();
+        ctx.register_type("AType");
+        ctx.register_type("BType");
+        ctx.register_type("CType");
+
+        let output = generate_commands_file(&commands, types_path, commands_path, &ctx);
+
+        // Should be AType, BType, CType
+        assert!(output.contains("import type { AType, BType, CType }"));
     }
 }
