@@ -166,25 +166,65 @@ fn generate_args_object(args: &[CommandArg]) -> String {
         .join(", ")
 }
 
-/// Calculate relative import path from types file to commands file
+/// Calculate relative import path from commands file to types file
 fn calculate_relative_import(types_file: &Path, commands_file: &Path) -> String {
     // Get the directory of the commands file
     let commands_dir = commands_file.parent().unwrap_or(Path::new("."));
+    let types_dir = types_file.parent().unwrap_or(Path::new("."));
+    let types_name = types_file.file_stem().unwrap_or_default().to_string_lossy();
 
-    // Get types file relative to commands dir
+    // If same directory, just use ./filename
+    if commands_dir == types_dir {
+        return format!("./{}", types_name);
+    }
+
+    // Try to strip prefix (types_file is inside commands_dir)
     if let Ok(relative) = types_file.strip_prefix(commands_dir) {
         let path = relative.with_extension("");
         let path_str = path.to_string_lossy();
         if path_str.starts_with('.') {
-            path_str.to_string()
+            return path_str.to_string();
         } else {
-            format!("./{}", path_str)
+            return format!("./{}", path_str);
         }
-    } else {
-        // Files are in different directories, compute relative path
-        let types_name = types_file.file_stem().unwrap_or_default();
-        format!("./{}", types_name.to_string_lossy())
     }
+
+    // Compute relative path by finding common ancestor
+    let commands_components: Vec<_> = commands_dir.components().collect();
+    let types_components: Vec<_> = types_dir.components().collect();
+
+    // Find common prefix length
+    let common_len = commands_components
+        .iter()
+        .zip(types_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Calculate how many ".." we need to go up from commands_dir
+    let up_count = commands_components.len() - common_len;
+
+    // Build the path: ../../../path/to/types_file
+    let mut result = String::new();
+    
+    if up_count == 0 {
+        result.push_str("./");
+    } else {
+        for _ in 0..up_count {
+            result.push_str("../");
+        }
+    }
+
+    // Add remaining path components from types file
+    for component in types_components.iter().skip(common_len) {
+        result.push_str(&component.as_os_str().to_string_lossy());
+        result.push('/');
+    }
+
+    // Add the filename without extension
+    result.push_str(&types_name);
+
+    // Clean up trailing slash if needed
+    result.trim_end_matches('/').to_string()
 }
 
 #[cfg(test)]

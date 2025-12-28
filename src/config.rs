@@ -78,8 +78,9 @@ impl Config {
         }
 
         // Ensure output directories exist or can be created
+        // Note: create_dir_all is idempotent and handles race conditions
         if let Some(parent) = self.output.types_file.parent() {
-            if !parent.exists() && !parent.as_os_str().is_empty() {
+            if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).with_context(|| {
                     format!("Failed to create output directory: {}", parent.display())
                 })?;
@@ -87,7 +88,7 @@ impl Config {
         }
 
         if let Some(parent) = self.output.commands_file.parent() {
-            if !parent.exists() && !parent.as_os_str().is_empty() {
+            if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent).with_context(|| {
                     format!("Failed to create output directory: {}", parent.display())
                 })?;

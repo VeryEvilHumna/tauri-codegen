@@ -47,19 +47,15 @@ impl Scanner {
     }
 
     /// Check if a path should be excluded
+    /// Uses component-based matching for more precise exclusion
     fn is_excluded(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy();
-
         for pattern in &self.exclude_patterns {
-            // Check if any component of the path matches the exclude pattern
-            if path_str.contains(pattern) {
-                return true;
-            }
-
-            // Also check against the file/directory name
-            if let Some(name) = path.file_name() {
-                if name.to_string_lossy() == *pattern {
-                    return true;
+            // Check each path component for an exact match
+            for component in path.components() {
+                if let std::path::Component::Normal(name) = component {
+                    if name.to_string_lossy() == *pattern {
+                        return true;
+                    }
                 }
             }
         }
@@ -113,9 +109,10 @@ mod tests {
         assert!(scanner.is_excluded(Path::new("tests")));
         // Directory in path
         assert!(scanner.is_excluded(Path::new("src/tests/file.rs")));
-        // Similar name but not exact match - should NOT be excluded
-        // "tests" is in "my_tests" as substring, so it will be excluded by current impl
-        assert!(scanner.is_excluded(Path::new("my_tests/file.rs")));
+        // Similar name but not exact match - should NOT be excluded with component-based matching
+        assert!(!scanner.is_excluded(Path::new("my_tests/file.rs")));
+        // Exact component within path
+        assert!(scanner.is_excluded(Path::new("foo/tests/bar.rs")));
     }
 
     #[test]

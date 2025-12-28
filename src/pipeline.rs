@@ -13,18 +13,21 @@ use crate::generator::{
     commands_gen::generate_commands_file, types_gen::generate_types_file, GeneratorContext,
 };
 use crate::models::{ParseResult, RustEnum, RustStruct, RustType};
-use crate::parser::{parse_commands, parse_types};
+use crate::parser::{parse_commands, parse_types, parse_types_expanded};
 use crate::resolver::{ModuleResolver, ResolutionResult};
 use crate::scanner::Scanner;
 
 /// Result of type collection with potential conflicts
 pub struct TypeCollectionResult {
-    /// Successfully resolved types: name -> source file
+    /// Successfully resolved types: name (as used in code) -> source file
     pub resolved: HashMap<String, PathBuf>,
     /// Conflicts: type name -> list of conflicting source files
     pub conflicts: HashMap<String, Vec<PathBuf>>,
     /// Unresolved types: type name -> file where it was used
     pub unresolved: HashMap<String, PathBuf>,
+    /// Alias mappings: alias name (as used) -> original struct name (in source)
+    /// This is needed for pub use X as Y re-exports
+    pub alias_to_original: HashMap<String, String>,
 }
 
 /// Main pipeline for code generation
@@ -97,9 +100,9 @@ impl Pipeline {
             }
         }
 
-        // Step 5: Filter types based on resolution
+        // Step 5: Filter types based on resolution (including aliased types)
         let (filtered_structs, filtered_enums) =
-            self.filter_types(&parse_result, &type_collection.resolved);
+            self.filter_types(&parse_result, &type_collection);
 
         // Summary
         println!(
@@ -183,8 +186,8 @@ impl Pipeline {
         if let Some(code) = expanded_code {
             let expanded_path = PathBuf::from("<cargo-expand>");
             
-            // Parse types from expanded code
-            match parse_types(code, &expanded_path) {
+            // Parse types from expanded code (uses different detection for serde attrs)
+            match parse_types_expanded(code, &expanded_path) {
                 Ok((structs, enums)) => {
                     if self.verbose {
                         eprintln!(
@@ -286,6 +289,7 @@ impl Pipeline {
         let mut resolved_types: HashMap<String, PathBuf> = HashMap::new();
         let mut conflicts: HashMap<String, Vec<PathBuf>> = HashMap::new();
         let mut unresolved_types: HashMap<String, PathBuf> = HashMap::new();
+        let mut alias_mappings: HashMap<String, String> = HashMap::new();
 
         // Build lookup maps: (name, source_file) -> type
         let struct_by_file: HashMap<(&str, &Path), &RustStruct> = parse_result
@@ -311,6 +315,7 @@ impl Pipeline {
                     &mut resolved_types,
                     &mut conflicts,
                     &mut unresolved_types,
+                    &mut alias_mappings,
                 );
             }
             if let Some(ref ret_type) = cmd.return_type {
@@ -321,6 +326,7 @@ impl Pipeline {
                     &mut resolved_types,
                     &mut conflicts,
                     &mut unresolved_types,
+                    &mut alias_mappings,
                 );
             }
         }
@@ -339,39 +345,48 @@ impl Pipeline {
             }
             processed.insert(key);
 
+            // Helper closure to process a nested type
+            let mut process_nested_type = |t: String| {
+                match resolver.resolve_type(&t, &type_file) {
+                    ResolutionResult::Found(source) => {
+                        let simple_name = t.split("::").last().unwrap_or(&t).to_string();
+                        if let Some(existing) = resolved_types.get(&simple_name) {
+                            if existing != &source {
+                                let conflict_list = conflicts
+                                    .entry(simple_name.clone())
+                                    .or_insert_with(|| vec![existing.clone()]);
+                                if !conflict_list.contains(&source) {
+                                    conflict_list.push(source);
+                                }
+                            }
+                        } else {
+                            resolved_types.insert(simple_name.clone(), source.clone());
+                            to_process.push((simple_name, source));
+                        }
+                    }
+                    ResolutionResult::FoundWithAlias(source, original_name) => {
+                        let alias_name = t.split("::").last().unwrap_or(&t).to_string();
+                        if !resolved_types.contains_key(&alias_name) {
+                            resolved_types.insert(alias_name.clone(), source.clone());
+                            alias_mappings.insert(alias_name.clone(), original_name.clone());
+                            to_process.push((original_name, source));
+                        }
+                    }
+                    ResolutionResult::Ambiguous(_) => {
+                        eprintln!("Warning: Ambiguous type '{}' used in {}", t, type_file.display());
+                    }
+                    ResolutionResult::NotFound => {
+                        let simple_name = t.split("::").last().unwrap_or(&t).to_string();
+                        unresolved_types.insert(simple_name, type_file.clone());
+                    }
+                }
+            };
+
             // Check if it's a struct in this file
             if let Some(s) = struct_by_file.get(&(type_name.as_str(), type_file.as_path())) {
                 for field in &s.fields {
-                    let nested_names = collect_custom_types_from_rust_type(&field.ty);
-                    for t in nested_names {
-                        match resolver.resolve_type(&t, &type_file) {
-                             ResolutionResult::Found(source) => {
-                                let simple_name = t.split("::").last().unwrap_or(&t).to_string();
-                                if let Some(existing) = resolved_types.get(&simple_name) {
-                                    if existing != &source {
-                                        let conflict_list = conflicts
-                                            .entry(simple_name.clone())
-                                            .or_insert_with(|| vec![existing.clone()]);
-                                        if !conflict_list.contains(&source) {
-                                            conflict_list.push(source);
-                                        }
-                                    }
-                                } else {
-                                    resolved_types.insert(simple_name.clone(), source.clone());
-                                    // We need to look up the definition using the simple name, 
-                                    // but we continue processing using the *resolved* source file 
-                                    // and the simple name which should match the struct definition.
-                                    to_process.push((simple_name, source));
-                                }
-                            }
-                            ResolutionResult::Ambiguous(_) => {
-                                eprintln!("Warning: Ambiguous type '{}' used in {}", t, type_file.display());
-                            }
-                            ResolutionResult::NotFound => {
-                                let simple_name = t.split("::").last().unwrap_or(&t).to_string();
-                                unresolved_types.insert(simple_name, type_file.clone());
-                            }
-                        }
+                    for t in collect_custom_types_from_rust_type(&field.ty) {
+                        process_nested_type(t);
                     }
                 }
             }
@@ -391,31 +406,7 @@ impl Pipeline {
                             .collect(),
                     };
                     for t in nested_names {
-                        match resolver.resolve_type(&t, &type_file) {
-                             ResolutionResult::Found(source) => {
-                                let simple_name = t.split("::").last().unwrap_or(&t).to_string();
-                                if let Some(existing) = resolved_types.get(&simple_name) {
-                                    if existing != &source {
-                                        let conflict_list = conflicts
-                                            .entry(simple_name.clone())
-                                            .or_insert_with(|| vec![existing.clone()]);
-                                        if !conflict_list.contains(&source) {
-                                            conflict_list.push(source);
-                                        }
-                                    }
-                                } else {
-                                    resolved_types.insert(simple_name.clone(), source.clone());
-                                    to_process.push((simple_name, source));
-                                }
-                            }
-                            ResolutionResult::Ambiguous(_) => {
-                                eprintln!("Warning: Ambiguous type '{}' used in {}", t, type_file.display());
-                            }
-                            ResolutionResult::NotFound => {
-                                let simple_name = t.split("::").last().unwrap_or(&t).to_string();
-                                unresolved_types.insert(simple_name, type_file.clone());
-                            }
-                        }
+                        process_nested_type(t);
                     }
                 }
             }
@@ -425,10 +416,12 @@ impl Pipeline {
             resolved: resolved_types,
             conflicts,
             unresolved: unresolved_types,
+            alias_to_original: alias_mappings,
         }
     }
 
     /// Collect types from RustType, resolving source files via resolver
+    #[allow(clippy::too_many_arguments)]
     fn collect_types_with_resolver(
         &self,
         ty: &RustType,
@@ -437,6 +430,7 @@ impl Pipeline {
         resolved: &mut HashMap<String, PathBuf>,
         conflicts: &mut HashMap<String, Vec<PathBuf>>,
         unresolved: &mut HashMap<String, PathBuf>,
+        alias_mappings: &mut HashMap<String, String>,
     ) {
         match ty {
             RustType::Custom(name) => {
@@ -457,9 +451,18 @@ impl Pipeline {
                             resolved.insert(simple_name, source);
                         }
                     }
-                     ResolutionResult::Ambiguous(paths) => {
-                         eprintln!("Warning: Ambiguous type '{}' in {}. Found in: {:?}", name, from_file.display(), paths);
-                     }
+                    ResolutionResult::FoundWithAlias(source, original_name) => {
+                        // This is a type accessed via alias (pub use X as Y)
+                        let alias_name = name.split("::").last().unwrap_or(name).to_string();
+                        if !resolved.contains_key(&alias_name) {
+                            resolved.insert(alias_name.clone(), source);
+                            // Record the mapping from alias to original name
+                            alias_mappings.insert(alias_name, original_name);
+                        }
+                    }
+                    ResolutionResult::Ambiguous(paths) => {
+                        eprintln!("Warning: Ambiguous type '{}' in {}. Found in: {:?}", name, from_file.display(), paths);
+                    }
                     ResolutionResult::NotFound => {
                         // Track unresolved types (likely macro-generated)
                         let simple_name = name.split("::").last().unwrap_or(name).to_string();
@@ -468,21 +471,21 @@ impl Pipeline {
                 }
             }
             RustType::Vec(inner) => {
-                self.collect_types_with_resolver(inner, from_file, resolver, resolved, conflicts, unresolved)
+                self.collect_types_with_resolver(inner, from_file, resolver, resolved, conflicts, unresolved, alias_mappings)
             }
             RustType::Option(inner) => {
-                self.collect_types_with_resolver(inner, from_file, resolver, resolved, conflicts, unresolved)
+                self.collect_types_with_resolver(inner, from_file, resolver, resolved, conflicts, unresolved, alias_mappings)
             }
             RustType::Result(ok) => {
-                self.collect_types_with_resolver(ok, from_file, resolver, resolved, conflicts, unresolved)
+                self.collect_types_with_resolver(ok, from_file, resolver, resolved, conflicts, unresolved, alias_mappings)
             }
             RustType::HashMap { key, value } => {
-                self.collect_types_with_resolver(key, from_file, resolver, resolved, conflicts, unresolved);
-                self.collect_types_with_resolver(value, from_file, resolver, resolved, conflicts, unresolved);
+                self.collect_types_with_resolver(key, from_file, resolver, resolved, conflicts, unresolved, alias_mappings);
+                self.collect_types_with_resolver(value, from_file, resolver, resolved, conflicts, unresolved, alias_mappings);
             }
             RustType::Tuple(tuple_types) => {
                 for t in tuple_types {
-                    self.collect_types_with_resolver(t, from_file, resolver, resolved, conflicts, unresolved);
+                    self.collect_types_with_resolver(t, from_file, resolver, resolved, conflicts, unresolved, alias_mappings);
                 }
             }
             _ => {}
@@ -493,11 +496,15 @@ impl Pipeline {
     fn filter_types(
         &self,
         parse_result: &ParseResult,
-        used_types: &HashMap<String, PathBuf>,
+        type_collection: &TypeCollectionResult,
     ) -> (Vec<RustStruct>, Vec<RustEnum>) {
+        let used_types = &type_collection.resolved;
+        let alias_mappings = &type_collection.alias_to_original;
+        
         let mut filtered_structs: Vec<RustStruct> = Vec::new();
         let mut seen_struct_names: HashSet<String> = HashSet::new();
 
+        // First pass: add structs by their original names
         for s in parse_result.structs.iter() {
             if seen_struct_names.contains(&s.name) {
                 continue;
@@ -509,6 +516,23 @@ impl Pipeline {
                     seen_struct_names.insert(s.name.clone());
                     filtered_structs.push(s.clone());
                 }
+            }
+        }
+
+        // Second pass: add aliased structs from cargo-expand
+        // For each alias -> original mapping, find the original struct and create an alias copy
+        for (alias_name, original_name) in alias_mappings {
+            if seen_struct_names.contains(alias_name) {
+                continue;
+            }
+            
+            // Find the original struct
+            if let Some(original_struct) = parse_result.structs.iter().find(|s| &s.name == original_name) {
+                // Create a copy with the alias name
+                let mut aliased_struct = original_struct.clone();
+                aliased_struct.name = alias_name.clone();
+                seen_struct_names.insert(alias_name.clone());
+                filtered_structs.push(aliased_struct);
             }
         }
 
@@ -526,6 +550,20 @@ impl Pipeline {
                     seen_enum_names.insert(e.name.clone());
                     filtered_enums.push(e.clone());
                 }
+            }
+        }
+
+        // Add aliased enums from cargo-expand
+        for (alias_name, original_name) in alias_mappings {
+            if seen_enum_names.contains(alias_name) {
+                continue;
+            }
+            
+            if let Some(original_enum) = parse_result.enums.iter().find(|e| &e.name == original_name) {
+                let mut aliased_enum = original_enum.clone();
+                aliased_enum.name = alias_name.clone();
+                seen_enum_names.insert(alias_name.clone());
+                filtered_enums.push(aliased_enum);
             }
         }
 
@@ -628,7 +666,7 @@ fn collect_custom_types_recursive(ty: &RustType, types: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CommandArg, EnumVariant, StructField, TauriCommand, VariantData};
+    use crate::models::{CommandArg, EnumRepresentation, EnumVariant, StructField, TauriCommand, VariantData};
 
     fn test_path() -> PathBuf {
         PathBuf::from("test.rs")
@@ -709,6 +747,16 @@ mod tests {
         assert_eq!(types, vec!["User"]);
     }
 
+    /// Helper to create a simple TypeCollectionResult for testing
+    fn make_type_collection(resolved: HashMap<String, PathBuf>) -> TypeCollectionResult {
+        TypeCollectionResult {
+            resolved,
+            conflicts: HashMap::new(),
+            unresolved: HashMap::new(),
+            alias_to_original: HashMap::new(),
+        }
+    }
+
     #[test]
     fn test_filter_types_includes_used() {
         let pipeline = Pipeline::new(false);
@@ -735,7 +783,7 @@ mod tests {
         let mut used_types = HashMap::new();
         used_types.insert("User".to_string(), PathBuf::from("src/types.rs"));
 
-        let (filtered_structs, _) = pipeline.filter_types(&parse_result, &used_types);
+        let (filtered_structs, _) = pipeline.filter_types(&parse_result, &make_type_collection(used_types));
 
         assert_eq!(filtered_structs.len(), 1);
         assert_eq!(filtered_structs[0].name, "User");
@@ -758,7 +806,7 @@ mod tests {
 
         let used_types = HashMap::new(); // Empty - no types used
 
-        let (filtered_structs, _) = pipeline.filter_types(&parse_result, &used_types);
+        let (filtered_structs, _) = pipeline.filter_types(&parse_result, &make_type_collection(used_types));
 
         assert!(filtered_structs.is_empty());
     }
@@ -790,7 +838,7 @@ mod tests {
         // Only src/a.rs version is used
         used_types.insert("User".to_string(), PathBuf::from("src/a.rs"));
 
-        let (filtered_structs, _) = pipeline.filter_types(&parse_result, &used_types);
+        let (filtered_structs, _) = pipeline.filter_types(&parse_result, &make_type_collection(used_types));
 
         assert_eq!(filtered_structs.len(), 1);
         assert_eq!(filtered_structs[0].source_file, PathBuf::from("src/a.rs"));
@@ -806,16 +854,20 @@ mod tests {
             enums: vec![
                 RustEnum {
                     name: "Status".to_string(),
+                    generics: vec![],
                     variants: vec![EnumVariant {
                         name: "Active".to_string(),
                         data: VariantData::Unit,
                     }],
                     source_file: PathBuf::from("src/types.rs"),
+                    representation: EnumRepresentation::default(),
                 },
                 RustEnum {
                     name: "UnusedEnum".to_string(),
+                    generics: vec![],
                     variants: vec![],
                     source_file: PathBuf::from("src/types.rs"),
+                    representation: EnumRepresentation::default(),
                 },
             ],
         };
@@ -823,7 +875,7 @@ mod tests {
         let mut used_types = HashMap::new();
         used_types.insert("Status".to_string(), PathBuf::from("src/types.rs"));
 
-        let (_, filtered_enums) = pipeline.filter_types(&parse_result, &used_types);
+        let (_, filtered_enums) = pipeline.filter_types(&parse_result, &make_type_collection(used_types));
 
         assert_eq!(filtered_enums.len(), 1);
         assert_eq!(filtered_enums[0].name, "Status");

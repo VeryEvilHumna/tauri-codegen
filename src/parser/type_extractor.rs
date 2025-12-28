@@ -1,3 +1,7 @@
+use crate::known_types::{
+    is_external_number_type, is_external_string_type, is_primitive_type, BYTES_TYPE,
+    JSON_VALUE_TYPE,
+};
 use crate::models::RustType;
 use std::collections::HashSet;
 use syn::{GenericArgument, PathArguments, Type};
@@ -19,38 +23,37 @@ pub fn parse_type_with_context(ty: &Type, generic_params: &HashSet<String>) -> R
                     return RustType::Generic(name);
                 }
 
+                // Check if it's a known primitive type
+                if is_primitive_type(&name) {
+                    // Special handling for str which maps to String
+                    let normalized = if name == "str" || name == "char" {
+                        "String".to_string()
+                    } else {
+                        name.clone()
+                    };
+                    return RustType::Primitive(normalized);
+                }
+
+                // Check if it's a known external type that serializes to string
+                if is_external_string_type(&name) {
+                    return RustType::Primitive(name);
+                }
+
+                // Check if it's a known external type that serializes to number
+                if is_external_number_type(&name) {
+                    return RustType::Primitive(name);
+                }
+
+                // Special types
+                if name == JSON_VALUE_TYPE {
+                    return RustType::Primitive(name);
+                }
+                if name == BYTES_TYPE {
+                    return RustType::Primitive(name);
+                }
+
+                // Generic container types
                 match name.as_str() {
-                    // Primitive types
-                    "String" | "str" | "char" => RustType::Primitive("String".to_string()),
-                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
-                        RustType::Primitive(name.clone())
-                    }
-                    "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
-                        RustType::Primitive(name.clone())
-                    }
-                    "f32" | "f64" => RustType::Primitive(name.clone()),
-                    "bool" => RustType::Primitive("bool".to_string()),
-
-                    // Well-known external types (serialized as strings)
-                    "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" // chrono
-                    | "OffsetDateTime" | "PrimitiveDateTime" | "Date" | "Time" // time crate
-                    | "Uuid" // uuid
-                    | "Decimal" | "BigDecimal" // decimal
-                    | "PathBuf" | "Path" // std::path
-                    | "Url" // url
-                    | "IpAddr" | "Ipv4Addr" | "Ipv6Addr" // std::net
-                    => RustType::Primitive(name.clone()),
-
-                    // Duration (serialized as number in milliseconds/seconds)
-                    "Duration" => RustType::Primitive("Duration".to_string()),
-
-                    // serde_json::Value (any JSON)
-                    "Value" => RustType::Primitive("Value".to_string()),
-
-                    // Bytes
-                    "Bytes" => RustType::Primitive("Bytes".to_string()),
-
-                    // Generic types
                     "Vec" => {
                         if let Some(inner) = extract_single_generic(&segment.arguments) {
                             RustType::Vec(Box::new(parse_type_with_context(&inner, generic_params)))

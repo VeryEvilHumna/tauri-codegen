@@ -1,3 +1,4 @@
+use crate::known_types;
 use crate::models::RustType;
 
 use super::GeneratorContext;
@@ -35,7 +36,26 @@ pub fn rust_to_typescript(rust_type: &RustType, ctx: &GeneratorContext) -> Strin
         RustType::HashMap { key, value } => {
             let key_ts = rust_to_typescript(key, ctx);
             let value_ts = rust_to_typescript(value, ctx);
-            format!("Record<{}, {}>", key_ts, value_ts)
+            
+            // Check if strict key usage is safe for TypeScript Record
+            let use_param_key = match &**key {
+                // bool keys become strings in JSON ("true"/"false") but are invalid in TS Record<bool, ...>
+                RustType::Primitive(p) if p == "bool" => false, 
+                // numbers/strings are fine
+                RustType::Primitive(_) => true,
+                // Custom types (enums, newtypes) are assumed to be valid string/number keys
+                RustType::Custom(_) => true,
+                // Generic Params are assumed to be valid
+                RustType::Generic(_) => true,
+                // Complex types (Vec, Option, etc) cannot be keys in TS Record
+                _ => false,
+            };
+
+            if use_param_key {
+                format!("Record<{}, {}>", key_ts, value_ts)
+            } else {
+                format!("Record<string, {}>", value_ts)
+            }
         }
 
         RustType::Tuple(types) => {
@@ -72,49 +92,16 @@ pub fn rust_to_typescript(rust_type: &RustType, ctx: &GeneratorContext) -> Strin
 
 /// Convert a Rust primitive type name to TypeScript
 fn primitive_to_typescript(name: &str) -> String {
-    match name {
-        "String" | "str" | "char" => "string".to_string(),
-
-        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
-        | "usize" | "f32" | "f64" => "number".to_string(),
-
-        "bool" => "boolean".to_string(),
-
-        // chrono types - serialize to ISO 8601 strings
-        "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => "string".to_string(),
-
-        // time crate types
-        "OffsetDateTime" | "PrimitiveDateTime" | "Date" | "Time" => "string".to_string(),
-
-        // UUID
-        "Uuid" => "string".to_string(),
-
-        // Decimal types
-        "Decimal" | "BigDecimal" => "string".to_string(),
-
-        // Path types
-        "PathBuf" | "Path" => "string".to_string(),
-
-        // Network types
-        "IpAddr" | "Ipv4Addr" | "Ipv6Addr" | "Url" => "string".to_string(),
-
-        // Duration (typically serialized as number - seconds or milliseconds)
-        "Duration" => "number".to_string(),
-
-        // serde_json::Value - any JSON value
-        "Value" => "unknown".to_string(),
-
-        // Bytes
-        "Bytes" => "number[]".to_string(),
-
-        _ => {
-            eprintln!(
-                "Warning: Unknown primitive type '{}', using 'unknown'",
-                name
-            );
-            "unknown".to_string()
-        }
+    // Use the centralized known_types module
+    if let Some(ts_type) = known_types::primitive_to_typescript(name) {
+        return ts_type.to_string();
     }
+    
+    eprintln!(
+        "Warning: Unknown primitive type '{}', using 'unknown'",
+        name
+    );
+    "unknown".to_string()
 }
 
 #[cfg(test)]

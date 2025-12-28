@@ -1,4 +1,4 @@
-use crate::models::{RustEnum, RustStruct, VariantData};
+use crate::models::{EnumRepresentation, RustEnum, RustStruct, VariantData};
 use crate::utils::to_camel_case;
 
 use super::{type_mapper::rust_to_typescript, GeneratorContext};
@@ -65,76 +65,113 @@ fn generate_enum_type(e: &RustEnum, ctx: &GeneratorContext) -> String {
 
     let type_name = ctx.format_type_name(&e.name);
 
-    // Check if this is a simple enum (all unit variants)
-    let is_simple = e
+    // Add generic parameters if present
+    let generics_str = if e.generics.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", e.generics.join(", "))
+    };
+
+    let variants: Vec<String> = e
         .variants
         .iter()
-        .all(|v| matches!(v.data, VariantData::Unit));
+        .map(|variant| generate_variant(variant, &e.representation, ctx))
+        .collect();
 
-    if is_simple {
-        // Generate as string union type
-        let variants: Vec<_> = e
-            .variants
-            .iter()
-            .map(|v| format!("\"{}\"", v.name))
-            .collect();
-
+    if variants.is_empty() {
         output.push_str(&format!(
-            "export type {} = {};\n",
-            type_name,
-            variants.join(" | ")
+            "export type {}{} = never;\n",
+            type_name, generics_str
         ));
     } else {
-        // Generate as discriminated union
-        let mut variant_types = Vec::new();
-
-        for variant in &e.variants {
-            match &variant.data {
-                VariantData::Unit => {
-                    variant_types.push(format!("{{ type: \"{}\" }}", variant.name));
-                }
-                VariantData::Tuple(types) => {
-                    let ts_types: Vec<_> = types
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| {
-                            let ts_type = rust_to_typescript(t, ctx);
-                            format!("value{}: {}", i, ts_type)
-                        })
-                        .collect();
-
-                    variant_types.push(format!(
-                        "{{ type: \"{}\"; {} }}",
-                        variant.name,
-                        ts_types.join("; ")
-                    ));
-                }
-                VariantData::Struct(fields) => {
-                    let ts_fields: Vec<_> = fields
-                        .iter()
-                        .map(|f| {
-                            let ts_type = rust_to_typescript(&f.ty, ctx);
-                            format!("{}: {}", to_camel_case(&f.name), ts_type)
-                        })
-                        .collect();
-
-                    variant_types.push(format!(
-                        "{{ type: \"{}\"; {} }}",
-                        variant.name,
-                        ts_fields.join("; ")
-                    ));
-                }
-            }
-        }
-
         output.push_str(&format!(
-            "export type {} =\n  | {};\n",
+            "export type {}{} =\n  | {};\n",
             type_name,
-            variant_types.join("\n  | ")
+            generics_str,
+            variants.join("\n  | ")
         ));
     }
 
     output
+}
+
+fn generate_variant(
+    variant: &crate::models::EnumVariant,
+    representation: &EnumRepresentation,
+    ctx: &GeneratorContext,
+) -> String {
+    match representation {
+        EnumRepresentation::External => match &variant.data {
+            VariantData::Unit => format!("\"{}\"", variant.name),
+            VariantData::Tuple(types) => {
+                let ts_types: Vec<_> = types.iter().map(|t| rust_to_typescript(t, ctx)).collect();
+                let inner = if ts_types.len() == 1 {
+                    ts_types[0].clone()
+                } else {
+                    format!("[{}]", ts_types.join(", "))
+                };
+                format!("{{ {}: {} }}", variant.name, inner)
+            }
+            VariantData::Struct(fields) => {
+                let inner = generate_struct_body(fields, ctx);
+                format!("{{ {}: {} }}", variant.name, inner)
+            }
+        },
+        EnumRepresentation::Internal { tag } => match &variant.data {
+            VariantData::Unit => format!("{{ {}: \"{}\" }}", tag, variant.name),
+            VariantData::Struct(fields) => {
+                let mut body = generate_struct_body(fields, ctx);
+                // Remove opening brace and insert tag
+                body.remove(0); // remove '{'
+                format!("{{ {}: \"{}\",{}", tag, variant.name, body)
+            }
+            VariantData::Tuple(_) => {
+                // Internal tagging doesn't support tuples strictly speaking (unless newtype around struct)
+                // We'll fallback to just the tag for now or maybe error?
+                // For safety let's just emit { tag: "Name" } & Partial<Tuple> ??
+                // Let's assume user knows what they are doing and it's likely not used with Tuples
+                format!("{{ {}: \"{}\" /* Tuple variants not fully supported in internal tagging */ }}", tag, variant.name)
+            }
+        },
+        EnumRepresentation::Adjacent { tag, content } => match &variant.data {
+            VariantData::Unit => format!("{{ {}: \"{}\" }}", tag, variant.name),
+            VariantData::Tuple(types) => {
+                let ts_types: Vec<_> = types.iter().map(|t| rust_to_typescript(t, ctx)).collect();
+                let inner = if ts_types.len() == 1 {
+                    ts_types[0].clone()
+                } else {
+                    format!("[{}]", ts_types.join(", "))
+                };
+                format!("{{ {}: \"{}\"; {}: {} }}", tag, variant.name, content, inner)
+            }
+            VariantData::Struct(fields) => {
+                let inner = generate_struct_body(fields, ctx);
+                format!("{{ {}: \"{}\"; {}: {} }}", tag, variant.name, content, inner)
+            }
+        },
+        EnumRepresentation::Untagged => match &variant.data {
+            VariantData::Unit => "null".to_string(), // Untagged unit matches null? Or nothing? Serde says it errors if it can't match. Usually untagged is for matching shapes.
+            VariantData::Tuple(types) => {
+                 let ts_types: Vec<_> = types.iter().map(|t| rust_to_typescript(t, ctx)).collect();
+                 if ts_types.len() == 1 {
+                     ts_types[0].clone()
+                 } else {
+                     format!("[{}]", ts_types.join(", "))
+                 }
+            }
+            VariantData::Struct(fields) => generate_struct_body(fields, ctx),
+        },
+    }
+}
+
+fn generate_struct_body(fields: &[crate::models::StructField], ctx: &GeneratorContext) -> String {
+    let mut params = Vec::new();
+    for field in fields {
+        let ts_type = rust_to_typescript(&field.ty, ctx);
+        let field_name = to_camel_case(&field.name);
+        params.push(format!("{}: {}", field_name, ts_type));
+    }
+    format!("{{ {} }}", params.join("; "))
 }
 
 #[cfg(test)]
@@ -232,6 +269,7 @@ mod tests {
     fn test_generate_simple_enum() {
         let e = RustEnum {
             name: "Status".to_string(),
+            generics: vec![],
             variants: vec![
                 EnumVariant {
                     name: "Active".to_string(),
@@ -247,6 +285,7 @@ mod tests {
                 },
             ],
             source_file: test_path(),
+            representation: EnumRepresentation::default(),
         };
 
         let ctx = default_ctx();
@@ -262,6 +301,7 @@ mod tests {
     fn test_generate_complex_enum_with_tuple() {
         let e = RustEnum {
             name: "Message".to_string(),
+            generics: vec![],
             variants: vec![
                 EnumVariant {
                     name: "Text".to_string(),
@@ -273,22 +313,23 @@ mod tests {
                 },
             ],
             source_file: test_path(),
+            representation: EnumRepresentation::default(),
         };
 
         let ctx = default_ctx();
         let output = generate_enum_type(&e, &ctx);
-
+        
         assert!(output.contains("export type Message ="));
-        assert!(output.contains("type: \"Text\""));
-        assert!(output.contains("value0: string"));
-        assert!(output.contains("type: \"Number\""));
-        assert!(output.contains("value0: number"));
+        // External representation: { Text: string } | { Number: number }
+        assert!(output.contains("Text: string"));
+        assert!(output.contains("Number: number"));
     }
 
     #[test]
     fn test_generate_complex_enum_with_struct() {
         let e = RustEnum {
             name: "UserRole".to_string(),
+            generics: vec![],
             variants: vec![
                 EnumVariant {
                     name: "Admin".to_string(),
@@ -303,6 +344,7 @@ mod tests {
                 },
             ],
             source_file: test_path(),
+            representation: EnumRepresentation::Internal { tag: "type".to_string() },
         };
 
         let ctx = default_ctx();
@@ -387,6 +429,7 @@ mod tests {
 
         let enums = vec![RustEnum {
             name: "Status".to_string(),
+            generics: vec![],
             variants: vec![
                 EnumVariant {
                     name: "Active".to_string(),
@@ -394,6 +437,7 @@ mod tests {
                 },
             ],
             source_file: test_path(),
+            representation: EnumRepresentation::default(),
         }];
 
         let ctx = default_ctx();

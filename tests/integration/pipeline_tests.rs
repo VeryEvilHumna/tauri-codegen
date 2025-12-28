@@ -804,3 +804,41 @@ pub fn get_resource(name: String) -> Resource {
     assert!(types_content.contains("\"Failed\""));
 }
 
+
+#[test]
+fn test_parse_expanded_real_progenitor_output() {
+    use tauri_ts_generator::parser::parse_types_expanded;
+    use std::path::PathBuf;
+    
+    // This is actual cargo expand output from progenitor
+    let code = r#"
+        pub mod auth {
+            pub mod generated_client {
+                pub mod types {
+                    pub struct AuthResponse {
+                        #[serde(rename = "accessToken")]
+                        pub access_token: ::std::string::String,
+                        #[serde(rename = "expiresIn")]
+                        pub expires_in: i64,
+                        #[serde(rename = "refreshToken")]
+                        pub refresh_token: ::std::string::String,
+                        #[serde(rename = "tokenType")]
+                        pub token_type: ::std::string::String,
+                    }
+                    pub struct UserProfile {
+                        pub email: String,
+                        #[serde(rename = "firstName")]
+                        pub first_name: String,
+                    }
+                }
+            }
+        }
+    "#;
+    
+    let (structs, _) = parse_types_expanded(code, &PathBuf::from("<test>")).unwrap();
+    
+    // Should find both AuthResponse and UserProfile through nested modules
+    let names: Vec<&str> = structs.iter().map(|s| s.name.as_str()).collect();
+    assert!(names.contains(&"AuthResponse"), "Should find AuthResponse, got {:?}", names);
+    assert!(names.contains(&"UserProfile"), "Should find UserProfile, got {:?}", names);
+}

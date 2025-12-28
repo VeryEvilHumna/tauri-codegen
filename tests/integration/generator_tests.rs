@@ -6,7 +6,7 @@ use tauri_ts_generator::generator::{
     commands_gen::generate_commands_file, types_gen::generate_types_file, GeneratorContext,
 };
 use tauri_ts_generator::models::{
-    CommandArg, EnumVariant, RustEnum, RustStruct, RustType, StructField, TauriCommand,
+    CommandArg, EnumRepresentation, EnumVariant, RustEnum, RustStruct, RustType, StructField, TauriCommand,
     VariantData,
 };
 use tauri_ts_generator::parser::{parse_commands, parse_types};
@@ -141,8 +141,9 @@ fn test_generate_complex_types() {
 
     // Check complex enum (Message with tuple and struct variants)
     assert!(output.contains("export type Message"));
-    assert!(output.contains("type: \"Text\""));
-    assert!(output.contains("type: \"Image\""));
+    // External representation
+    assert!(output.contains("Text: string"));
+    assert!(output.contains("Image: {"));
 }
 
 #[test]
@@ -319,6 +320,7 @@ fn test_snake_case_fields_converted_to_camel_case() {
 fn test_complex_enum_discriminated_union() {
     let enums = vec![RustEnum {
         name: "Event".to_string(),
+        generics: vec![],
         variants: vec![
             EnumVariant {
                 name: "Click".to_string(),
@@ -343,6 +345,7 @@ fn test_complex_enum_discriminated_union() {
             },
         ],
         source_file: PathBuf::from("test.rs"),
+        representation: EnumRepresentation::default(),
     }];
 
     let ctx = GeneratorContext::new(NamingConfig::default());
@@ -350,11 +353,15 @@ fn test_complex_enum_discriminated_union() {
     let output = generate_types_file(&[], &enums, &ctx);
 
     assert!(output.contains("export type Event"));
-    assert!(output.contains("type: \"Click\""));
+    // External representation
+    // Click: { x: number, y: number }
+    assert!(output.contains("Click: {"));
     assert!(output.contains("x: number"));
-    assert!(output.contains("y: number"));
-    assert!(output.contains("type: \"KeyPress\""));
-    assert!(output.contains("value0: string"));
-    assert!(output.contains("type: \"Close\""));
+    
+    // KeyPress: string
+    assert!(output.contains("KeyPress: string"));
+    
+    // Close (unit variant) -> "Close"
+    assert!(output.contains("\"Close\""));
 }
 

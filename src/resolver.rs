@@ -17,6 +17,9 @@ use syn::{Item, UseTree};
 pub enum ResolutionResult {
     /// Successfully resolved to a single file
     Found(PathBuf),
+    /// Successfully resolved with alias mapping (file, original_type_name)
+    /// Used when resolving `pub use X as Y` - returns the file and original name X
+    FoundWithAlias(PathBuf, String),
     /// Type not found
     NotFound,
     /// Ambiguous: found in multiple files
@@ -82,30 +85,8 @@ impl ModuleResolver {
             ..Default::default()
         };
 
-        for item in &syntax.items {
-            match item {
-                Item::Use(item_use) => {
-                    self.parse_use_tree(&item_use.tree, &mut scope, Vec::new());
-                }
-                Item::Struct(s) => {
-                    let name = s.ident.to_string();
-                    scope.local_types.insert(name.clone(), TypeKind::Struct);
-                    self.type_definitions
-                        .entry(name)
-                        .or_default()
-                        .push(path.to_path_buf());
-                }
-                Item::Enum(e) => {
-                    let name = e.ident.to_string();
-                    scope.local_types.insert(name.clone(), TypeKind::Enum);
-                    self.type_definitions
-                        .entry(name)
-                        .or_default()
-                        .push(path.to_path_buf());
-                }
-                _ => {}
-            }
-        }
+        // Process items, including nested modules
+        self.parse_items(&syntax.items, path, &mut scope);
 
         self.module_to_file
             .insert(scope.module_path.clone(), path.to_path_buf());
@@ -114,32 +95,78 @@ impl ModuleResolver {
         Ok(())
     }
 
+    /// Parse items recursively (handles nested modules)
+    fn parse_items(&mut self, items: &[Item], path: &Path, scope: &mut FileScope) {
+        for item in items {
+            match item {
+                Item::Use(item_use) => {
+                    self.parse_use_tree(&item_use.tree, scope, &mut Vec::new());
+                }
+                Item::Struct(s) => {
+                    let name = s.ident.to_string();
+                    scope.local_types.insert(name.clone(), TypeKind::Struct);
+                    self.register_type_definition(&name, path);
+                }
+                Item::Enum(e) => {
+                    let name = e.ident.to_string();
+                    scope.local_types.insert(name.clone(), TypeKind::Enum);
+                    self.register_type_definition(&name, path);
+                }
+                Item::Type(t) => {
+                    // Handle type aliases: type Foo = Bar;
+                    let name = t.ident.to_string();
+                    scope.local_types.insert(name.clone(), TypeKind::Struct); // Treat as struct-like
+                    self.register_type_definition(&name, path);
+                }
+                Item::Mod(m) => {
+                    // Recursively parse types inside inline modules
+                    if let Some((_, mod_items)) = &m.content {
+                        self.parse_items(mod_items, path, scope);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Register a type definition, avoiding duplicates
+    fn register_type_definition(&mut self, name: &str, path: &Path) {
+        let locations = self.type_definitions.entry(name.to_string()).or_default();
+        let path_buf = path.to_path_buf();
+        if !locations.contains(&path_buf) {
+            locations.push(path_buf);
+        }
+    }
+
     /// Parse use tree recursively
-    fn parse_use_tree(&self, tree: &UseTree, scope: &mut FileScope, mut prefix: Vec<String>) {
+    fn parse_use_tree(&self, tree: &UseTree, scope: &mut FileScope, prefix: &mut Vec<String>) {
         match tree {
             UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
                 self.parse_use_tree(&path.tree, scope, prefix);
+                prefix.pop();
             }
             UseTree::Name(name) => {
                 let type_name = name.ident.to_string();
                 prefix.push(type_name.clone());
                 scope
                     .imports
-                    .insert(type_name, ImportedType { path: prefix });
+                    .insert(type_name, ImportedType { path: prefix.clone() });
+                prefix.pop();
             }
             UseTree::Rename(rename) => {
                 let original_name = rename.ident.to_string();
                 let alias = rename.rename.to_string();
                 prefix.push(original_name);
-                scope.imports.insert(alias, ImportedType { path: prefix });
+                scope.imports.insert(alias, ImportedType { path: prefix.clone() });
+                prefix.pop();
             }
             UseTree::Glob(_) => {
-                scope.wildcard_imports.push(prefix);
+                scope.wildcard_imports.push(prefix.clone());
             }
             UseTree::Group(group) => {
                 for item in &group.items {
-                    self.parse_use_tree(item, scope, prefix.clone());
+                    self.parse_use_tree(item, scope, prefix);
                 }
             }
         }
@@ -167,9 +194,15 @@ impl ModuleResolver {
     /// Resolve a type name in the context of a specific file
     pub fn resolve_type(&self, type_path: &str, from_file: &Path) -> ResolutionResult {
         let segments: Vec<&str> = type_path.split("::").filter(|s| !s.is_empty()).collect();
+        let type_name = segments.last().copied().unwrap_or("");
+        
         let scope = match self.files.get(from_file) {
             Some(s) => s,
-            None => return ResolutionResult::NotFound,
+            None => {
+                // No scope for this file (e.g., <cargo-expand>)
+                // Try to resolve from global type_definitions
+                return self.try_resolve_from_definitions(type_name);
+            }
         };
 
         // Handle simple name (no ::)
@@ -195,7 +228,8 @@ impl ModuleResolver {
 
         // 2. Check explicit imports
         if let Some(imported) = scope.imports.get(name) {
-            return self.resolve_module_path(&imported.path);
+            let result = self.resolve_module_path(&imported.path);
+            return self.wrap_alias_if_needed(result, name, &imported.path);
         }
 
         // 3. Check wildcard imports
@@ -213,7 +247,6 @@ impl ModuleResolver {
                 return ResolutionResult::Found(locations[0].clone());
             }
             // If multiple found, try to filter by proximity or return ambiguous
-            // Simple proximity check: same parent module?
             let from_module = &scope.module_path;
             
             // Prioritize siblings (same parent module)
@@ -236,6 +269,28 @@ impl ModuleResolver {
         }
 
         ResolutionResult::NotFound
+    }
+
+    /// Wrap resolution result with alias information if the import used a rename
+    fn wrap_alias_if_needed(
+        &self,
+        result: ResolutionResult,
+        import_name: &str,
+        import_path: &[String],
+    ) -> ResolutionResult {
+        let original_name = import_path.last().map(|s| s.as_str()).unwrap_or("");
+        let is_alias = original_name != import_name && !original_name.is_empty();
+        
+        if is_alias {
+            match result {
+                ResolutionResult::Found(path) => {
+                    ResolutionResult::FoundWithAlias(path, original_name.to_string())
+                }
+                other => other,
+            }
+        } else {
+            result
+        }
     }
 
     fn resolve_path(&self, segments: &[&str], scope: &FileScope) -> ResolutionResult {
@@ -313,9 +368,10 @@ impl ModuleResolver {
                 
                 // 2. Check re-exports (imports via pub use or use)
                 if let Some(imported) = scope.imports.get(type_name) {
-                     // Recursively resolve the imported path relative to THIS module
-                     let segments: Vec<&str> = imported.path.iter().map(|s| s.as_str()).collect();
-                     return self.resolve_path(&segments, scope);
+                    // Recursively resolve the imported path relative to THIS module
+                    let segments: Vec<&str> = imported.path.iter().map(|s| s.as_str()).collect();
+                    let result = self.resolve_path(&segments, scope);
+                    return self.wrap_alias_if_needed(result, type_name, &imported.path);
                 }
                 
                 // 3. Check wildcard re-exports (pub use submod::*)
@@ -329,6 +385,20 @@ impl ModuleResolver {
             }
         }
         
+        // 4. Fallback: check type_definitions for types from cargo expand
+        // This handles cases where the type is generated by a macro and registered globally
+        self.try_resolve_from_definitions(type_name)
+    }
+
+    /// Try to resolve a type from global type_definitions (cargo expand types)
+    fn try_resolve_from_definitions(&self, type_name: &str) -> ResolutionResult {
+        if let Some(locations) = self.type_definitions.get(type_name) {
+            if locations.len() == 1 {
+                return ResolutionResult::Found(locations[0].clone());
+            } else if !locations.is_empty() {
+                return ResolutionResult::Ambiguous(locations.clone());
+            }
+        }
         ResolutionResult::NotFound
     }
     
@@ -378,6 +448,10 @@ impl ModuleResolver {
 }
 
 fn are_siblings(path_a: &[String], path_b: &[String]) -> bool {
+    // Empty paths or single-element paths can't be siblings
+    if path_a.len() < 2 || path_b.len() < 2 {
+        return false;
+    }
     if path_a.len() != path_b.len() {
         return false;
     }
@@ -385,7 +459,7 @@ fn are_siblings(path_a: &[String], path_b: &[String]) -> bool {
     // a: [crate, foo, bar]
     // b: [crate, foo, baz]
     // parent: [crate, foo]
-    path_a[..path_a.len()-1] == path_b[..path_b.len()-1]
+    path_a[..path_a.len() - 1] == path_b[..path_b.len() - 1]
 }
 
 #[cfg(test)]
@@ -562,9 +636,8 @@ mod tests {
         let lib_code = "pub mod types; pub use types::User;";
         resolver.parse_file(&lib_path, lib_code, &base_path()).unwrap();
 
-        if let Some(scope) = resolver.files.get(&lib_path) {
-            eprintln!("Lib imports: {:?}", scope.imports);
-        }
+        // Verify lib_path was parsed correctly
+        assert!(resolver.files.get(&lib_path).is_some());
 
         // src/cmd.rs -> use crate::User;
         let main_path = PathBuf::from("src/cmd.rs");
@@ -716,5 +789,90 @@ mod tests {
             ResolutionResult::Found(p) => assert_eq!(p, b_path),
             res => panic!("Failed to resolve wildcard re-export: {:?}", res),
         }
+    }
+
+    #[test]
+    fn test_are_siblings_empty_path() {
+        // Empty paths should not panic and return false
+        assert!(!are_siblings(&[], &[]));
+        assert!(!are_siblings(&["crate".to_string()], &[]));
+        assert!(!are_siblings(&[], &["crate".to_string()]));
+    }
+
+    #[test]
+    fn test_are_siblings_single_element() {
+        // Single element paths can't have siblings (no parent)
+        assert!(!are_siblings(
+            &["crate".to_string()],
+            &["crate".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_are_siblings_valid() {
+        assert!(are_siblings(
+            &["crate".to_string(), "foo".to_string()],
+            &["crate".to_string(), "bar".to_string()]
+        ));
+        assert!(!are_siblings(
+            &["crate".to_string(), "foo".to_string()],
+            &["crate".to_string(), "other".to_string(), "bar".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_parse_nested_module() {
+        let mut resolver = ModuleResolver::new();
+
+        let code = r#"
+            mod inner {
+                pub struct NestedType;
+            }
+            pub struct OuterType;
+        "#;
+        let path = PathBuf::from("src/lib.rs");
+        resolver.parse_file(&path, code, &base_path()).unwrap();
+
+        // Both types should be registered
+        assert!(resolver.type_definitions.contains_key("NestedType"));
+        assert!(resolver.type_definitions.contains_key("OuterType"));
+    }
+
+    #[test]
+    fn test_parse_type_alias() {
+        let mut resolver = ModuleResolver::new();
+
+        let code = r#"
+            pub struct RealType;
+            pub type AliasType = RealType;
+        "#;
+        let path = PathBuf::from("src/types.rs");
+        resolver.parse_file(&path, code, &base_path()).unwrap();
+
+        // Both should be registered
+        assert!(resolver.type_definitions.contains_key("RealType"));
+        assert!(resolver.type_definitions.contains_key("AliasType"));
+
+        // Resolve alias type
+        match resolver.resolve_type("AliasType", &path) {
+            ResolutionResult::Found(p) => assert_eq!(p, path),
+            res => panic!("Failed to resolve type alias: {:?}", res),
+        }
+    }
+
+    #[test]
+    fn test_no_duplicate_registration() {
+        let mut resolver = ModuleResolver::new();
+
+        let code = "pub struct User;";
+        let path = PathBuf::from("src/types.rs");
+
+        // Parse the same file twice
+        resolver.parse_file(&path, code, &base_path()).unwrap();
+        resolver.parse_file(&path, code, &base_path()).unwrap();
+
+        // Should only have one entry for the path
+        let locations = resolver.type_definitions.get("User").unwrap();
+        assert_eq!(locations.len(), 1);
     }
 }

@@ -1,5 +1,5 @@
 /// Represents a Rust type
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RustType {
     /// Primitive types (String, i32, bool, etc.)
     Primitive(String),

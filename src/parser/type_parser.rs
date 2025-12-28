@@ -1,53 +1,79 @@
-use crate::models::{EnumVariant, RustEnum, RustStruct, StructField, VariantData};
+use crate::models::{EnumVariant, RustEnum, RustStruct, StructField, VariantData, EnumRepresentation};
+use crate::utils::{to_camel_case, to_kebab_case, to_screaming_kebab_case, to_screaming_snake_case, to_snake_case};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::path::Path;
-use syn::{Fields, Item, ItemEnum, ItemStruct};
+use syn::{Fields, Item, ItemEnum, ItemStruct, Expr, Lit, Meta};
 
-use super::type_extractor::{parse_type, parse_type_with_context};
+use super::type_extractor::parse_type_with_context;
+
+/// Serde container attributes that affect naming
+#[derive(Debug, Default)]
+struct SerdeContainerAttrs {
+    /// Value of rename_all attribute (e.g., "camelCase", "snake_case")
+    rename_all: Option<String>,
+    /// Value of tag attribute (e.g., "type")
+    tag: Option<String>,
+    /// Value of content attribute (e.g., "content")
+    content: Option<String>,
+    /// Whether the enum is untagged
+    untagged: bool,
+}
 
 /// Parse a Rust source file and extract structs and enums
 pub fn parse_types(content: &str, source_file: &Path) -> Result<(Vec<RustStruct>, Vec<RustEnum>)> {
+    parse_types_internal(content, source_file, false)
+}
+
+/// Parse expanded Rust code (from cargo expand) and extract structs and enums
+/// This uses different detection logic since derive macros are already expanded
+pub fn parse_types_expanded(content: &str, source_file: &Path) -> Result<(Vec<RustStruct>, Vec<RustEnum>)> {
+    parse_types_internal(content, source_file, true)
+}
+
+/// Internal parsing function
+fn parse_types_internal(content: &str, source_file: &Path, expanded: bool) -> Result<(Vec<RustStruct>, Vec<RustEnum>)> {
     let syntax = syn::parse_file(content)?;
     let mut structs = Vec::new();
     let mut enums = Vec::new();
 
-    for item in syntax.items {
+    // For expanded code, first collect all types that have Serialize/Deserialize impls
+    let serializable_types = if expanded {
+        collect_serializable_types(&syntax.items)
+    } else {
+        HashSet::new()
+    };
+
+    parse_items(&syntax.items, source_file, expanded, &serializable_types, &mut structs, &mut enums);
+
+    Ok((structs, enums))
+}
+
+/// Collect names of all types that have impl Serialize or Deserialize (from cargo expand)
+fn collect_serializable_types(items: &[Item]) -> HashSet<String> {
+    let mut result = HashSet::new();
+    collect_serializable_types_recursive(items, &mut result);
+    result
+}
+
+fn collect_serializable_types_recursive(items: &[Item], result: &mut HashSet<String>) {
+    for item in items {
         match item {
-            Item::Struct(item_struct) => {
-                if is_serializable(&item_struct.attrs) {
-                    if let Some(s) = parse_struct(&item_struct, source_file) {
-                        structs.push(s);
-                    }
-                }
-            }
-            Item::Enum(item_enum) => {
-                if is_serializable(&item_enum.attrs) {
-                    if let Some(e) = parse_enum(&item_enum, source_file) {
-                        enums.push(e);
-                    }
-                }
+            Item::Impl(item_impl) => {
+                check_serde_impl(item_impl, result);
             }
             Item::Mod(module) => {
-                // Also parse types inside modules
-                if let Some((_, items)) = module.content {
-                    for mod_item in items {
-                        match mod_item {
-                            Item::Struct(item_struct) => {
-                                if is_serializable(&item_struct.attrs) {
-                                    if let Some(s) = parse_struct(&item_struct, source_file) {
-                                        structs.push(s);
-                                    }
-                                }
-                            }
-                            Item::Enum(item_enum) => {
-                                if is_serializable(&item_enum.attrs) {
-                                    if let Some(e) = parse_enum(&item_enum, source_file) {
-                                        enums.push(e);
-                                    }
-                                }
-                            }
-                            _ => {}
+                if let Some((_, mod_items)) = &module.content {
+                    collect_serializable_types_recursive(mod_items, result);
+                }
+            }
+            Item::Const(item_const) => {
+                // serde puts impl Serialize/Deserialize inside `const _: () = { impl ... }`
+                // We need to parse these blocks too
+                if let syn::Expr::Block(expr_block) = &*item_const.expr {
+                    for stmt in &expr_block.block.stmts {
+                        if let syn::Stmt::Item(Item::Impl(item_impl)) = stmt {
+                            check_serde_impl(item_impl, result);
                         }
                     }
                 }
@@ -55,21 +81,160 @@ pub fn parse_types(content: &str, source_file: &Path) -> Result<(Vec<RustStruct>
             _ => {}
         }
     }
+}
 
-    Ok((structs, enums))
+/// Check if an impl block is for Serialize/Deserialize and extract the type name
+fn check_serde_impl(item_impl: &syn::ItemImpl, result: &mut HashSet<String>) {
+    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+        let trait_name = trait_path.segments.last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        
+        if trait_name == "Serialize" || trait_name == "Deserialize" {
+            // Extract the type name from self_ty
+            if let syn::Type::Path(type_path) = &*item_impl.self_ty {
+                if let Some(segment) = type_path.path.segments.last() {
+                    result.insert(segment.ident.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Recursively parse items from a list
+fn parse_items(
+    items: &[Item],
+    source_file: &Path,
+    expanded: bool,
+    serializable_types: &HashSet<String>,
+    structs: &mut Vec<RustStruct>,
+    enums: &mut Vec<RustEnum>,
+) {
+    for item in items {
+        match item {
+            Item::Struct(item_struct) => {
+                let name = item_struct.ident.to_string();
+                let should_include = if expanded {
+                    // For expanded code: check impl Serialize/Deserialize OR serde attrs on fields
+                    serializable_types.contains(&name) 
+                        || is_serializable(&item_struct.attrs) 
+                        || has_serde_field_attrs(item_struct)
+                } else {
+                    is_serializable(&item_struct.attrs)
+                };
+                
+                if should_include {
+                    if let Some(s) = parse_struct(item_struct, source_file) {
+                        structs.push(s);
+                    }
+                }
+            }
+            Item::Enum(item_enum) => {
+                let name = item_enum.ident.to_string();
+                let should_include = if expanded {
+                    // For expanded code: check impl Serialize/Deserialize OR serde attrs on variants
+                    serializable_types.contains(&name)
+                        || is_serializable(&item_enum.attrs) 
+                        || has_serde_variant_attrs(item_enum)
+                } else {
+                    is_serializable(&item_enum.attrs)
+                };
+                
+                if should_include {
+                    if let Some(e) = parse_enum(item_enum, source_file) {
+                        enums.push(e);
+                    }
+                }
+            }
+            Item::Mod(module) => {
+                // Also parse types inside modules (recursively)
+                if let Some((_, mod_items)) = &module.content {
+                    parse_items(mod_items, source_file, expanded, serializable_types, structs, enums);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Check if a type has Serialize or Deserialize derive attribute
 /// This indicates the type is meant for serialization and should be exported
 fn is_serializable(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
-        if let syn::Meta::List(meta_list) = &attr.meta {
+        if let Meta::List(meta_list) = &attr.meta {
             if meta_list.path.is_ident("derive") {
-                let tokens = meta_list.tokens.to_string();
-                if tokens.contains("Serialize") || tokens.contains("Deserialize") {
+                // Parse the derive macro arguments properly
+                if let Ok(nested) = meta_list.parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                ) {
+                    for path in nested {
+                        if let Some(ident) = path.get_ident() {
+                            let name = ident.to_string();
+                            if name == "Serialize" || name == "Deserialize" {
+                                return true;
+                            }
+                        }
+                        // Also check for fully qualified paths like serde::Serialize
+                        if let Some(last) = path.segments.last() {
+                            let name = last.ident.to_string();
+                            if name == "Serialize" || name == "Deserialize" {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if a struct has serde attributes on its fields (for expanded code)
+/// In cargo expand output, derive macros are already expanded, so we check for
+/// #[serde(...)] attributes on fields instead
+fn has_serde_field_attrs(item: &ItemStruct) -> bool {
+    if let Fields::Named(named) = &item.fields {
+        for field in &named.named {
+            for attr in &field.attrs {
+                if attr.path().is_ident("serde") {
                     return true;
                 }
             }
+        }
+    }
+    false
+}
+
+/// Check if an enum has serde attributes on variants or variant fields
+fn has_serde_variant_attrs(item: &ItemEnum) -> bool {
+    for variant in &item.variants {
+        // Check variant attrs
+        for attr in &variant.attrs {
+            if attr.path().is_ident("serde") {
+                return true;
+            }
+        }
+        // Check variant field attrs
+        match &variant.fields {
+            Fields::Named(named) => {
+                for field in &named.named {
+                    for attr in &field.attrs {
+                        if attr.path().is_ident("serde") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Fields::Unnamed(unnamed) => {
+                for field in &unnamed.unnamed {
+                    for attr in &field.attrs {
+                        if attr.path().is_ident("serde") {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Fields::Unit => {}
         }
     }
     false
@@ -140,19 +305,60 @@ fn parse_struct(item: &ItemStruct, source_file: &Path) -> Option<RustStruct> {
 fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
     let name = item.ident.to_string();
 
+    // Extract generic type parameters
+    let generics: Vec<String> = item
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| {
+            if let syn::GenericParam::Type(type_param) = param {
+                Some(type_param.ident.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Create a set for efficient lookup when parsing field types
+    let generic_params: HashSet<String> = generics.iter().cloned().collect();
+
+    // Parse container-level serde attributes (like rename_all)
+    let container_attrs = parse_serde_container_attrs(&item.attrs);
+
+    let representation = if container_attrs.untagged {
+        EnumRepresentation::Untagged
+    } else if let Some(tag) = &container_attrs.tag {
+        if let Some(content) = &container_attrs.content {
+            EnumRepresentation::Adjacent {
+                tag: tag.clone(),
+                content: content.clone(),
+            }
+        } else {
+            EnumRepresentation::Internal { tag: tag.clone() }
+        }
+    } else {
+        EnumRepresentation::External
+    };
+
     let variants = item
         .variants
         .iter()
         .map(|variant| {
             let variant_name = variant.ident.to_string();
 
-            // Check for serde rename attribute
-            let final_name = get_serde_rename(&variant.attrs).unwrap_or(variant_name);
+            // Check for serde rename attribute on variant
+            let final_name = get_serde_rename(&variant.attrs)
+                .or_else(|| apply_rename_all(&variant_name, &container_attrs.rename_all))
+                .unwrap_or(variant_name);
 
             let data = match &variant.fields {
                 Fields::Unit => VariantData::Unit,
                 Fields::Unnamed(unnamed) => {
-                    let types = unnamed.unnamed.iter().map(|f| parse_type(&f.ty)).collect();
+                    let types = unnamed
+                        .unnamed
+                        .iter()
+                        .map(|f| parse_type_with_context(&f.ty, &generic_params))
+                        .collect();
                     VariantData::Tuple(types)
                 }
                 Fields::Named(named) => {
@@ -164,7 +370,7 @@ fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
                             let final_name = get_serde_rename(&field.attrs).unwrap_or(field_name);
                             Some(StructField {
                                 name: final_name,
-                                ty: parse_type(&field.ty),
+                                ty: parse_type_with_context(&field.ty, &generic_params),
                             })
                         })
                         .collect();
@@ -181,27 +387,30 @@ fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
 
     Some(RustEnum {
         name,
+        generics,
         variants,
         source_file: source_file.to_path_buf(),
+        representation,
     })
 }
 
 /// Get the serde rename value from attributes if present
 fn get_serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
     for attr in attrs {
-        if let syn::Meta::List(meta_list) = &attr.meta {
+        if let Meta::List(meta_list) = &attr.meta {
             if meta_list.path.is_ident("serde") {
-                let tokens = meta_list.tokens.to_string();
-                // Look for rename = "..."
-                if let Some(start) = tokens.find("rename") {
-                    let rest = &tokens[start..];
-                    if let Some(eq_pos) = rest.find('=') {
-                        let after_eq = rest[eq_pos + 1..].trim();
-                        // Extract the string value
-                        if let Some(quote_start) = after_eq.find('"') {
-                            let after_quote = &after_eq[quote_start + 1..];
-                            if let Some(quote_end) = after_quote.find('"') {
-                                return Some(after_quote[..quote_end].to_string());
+                // Parse the serde attribute arguments properly
+                if let Ok(nested) = meta_list.parse_args_with(
+                    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+                ) {
+                    for meta in nested {
+                        if let Meta::NameValue(nv) = meta {
+                            if nv.path.is_ident("rename") {
+                                if let Expr::Lit(expr_lit) = &nv.value {
+                                    if let Lit::Str(lit_str) = &expr_lit.lit {
+                                        return Some(lit_str.value());
+                                    }
+                                }
                             }
                         }
                     }
@@ -211,6 +420,73 @@ fn get_serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
     }
     None
 }
+
+/// Parse serde container attributes (rename_all, etc.)
+fn parse_serde_container_attrs(attrs: &[syn::Attribute]) -> SerdeContainerAttrs {
+    let mut result = SerdeContainerAttrs::default();
+
+    for attr in attrs {
+        if let Meta::List(meta_list) = &attr.meta {
+            if meta_list.path.is_ident("serde") {
+                if let Ok(nested) = meta_list.parse_args_with(
+                    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+                ) {
+                    for meta in nested {
+                        match meta {
+                            Meta::NameValue(nv) => {
+                                if nv.path.is_ident("rename_all") {
+                                    if let Expr::Lit(expr_lit) = &nv.value {
+                                        if let Lit::Str(lit_str) = &expr_lit.lit {
+                                            result.rename_all = Some(lit_str.value());
+                                        }
+                                    }
+                                } else if nv.path.is_ident("tag") {
+                                    if let Expr::Lit(expr_lit) = &nv.value {
+                                        if let Lit::Str(lit_str) = &expr_lit.lit {
+                                            result.tag = Some(lit_str.value());
+                                        }
+                                    }
+                                } else if nv.path.is_ident("content") {
+                                    if let Expr::Lit(expr_lit) = &nv.value {
+                                        if let Lit::Str(lit_str) = &expr_lit.lit {
+                                            result.content = Some(lit_str.value());
+                                        }
+                                    }
+                                }
+                            }
+                            Meta::Path(path) => {
+                                if path.is_ident("untagged") {
+                                    result.untagged = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Apply rename_all transformation to a name
+fn apply_rename_all(name: &str, rename_all: &Option<String>) -> Option<String> {
+    let rule = rename_all.as_ref()?;
+    Some(match rule.as_str() {
+        "lowercase" => name.to_lowercase(),
+        "UPPERCASE" => name.to_uppercase(),
+        "camelCase" => to_camel_case(name),
+        "snake_case" => to_snake_case(name),
+        "SCREAMING_SNAKE_CASE" => to_screaming_snake_case(name),
+        "kebab-case" => to_kebab_case(name),
+        "SCREAMING-KEBAB-CASE" => to_screaming_kebab_case(name),
+        "PascalCase" => name.to_string(), // Usually already PascalCase in Rust
+        _ => name.to_string(),
+    })
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -541,5 +817,52 @@ mod tests {
             other => panic!("Expected HashMap, got {:?}", other),
         }
     }
-}
 
+    #[test]
+    fn test_parse_expanded_code_with_serde_attrs() {
+        let code = r#"
+            pub mod types {
+                pub struct AuthResponse {
+                    #[serde(rename = "accessToken")]
+                    pub access_token: ::std::string::String,
+                    #[serde(rename = "refreshToken")]
+                    pub refresh_token: ::std::string::String,
+                }
+            }
+        "#;
+        
+        let (structs, _) = super::parse_types_expanded(code, &test_path()).unwrap();
+        assert_eq!(structs.len(), 1, "Should find AuthResponse struct");
+        assert_eq!(structs[0].name, "AuthResponse");
+    }
+
+    #[test]
+    fn test_parse_expanded_without_derive_but_with_serde_field_attrs() {
+        // This simulates cargo expand output where derive is already expanded
+        let code = r#"
+            pub struct User {
+                #[serde(rename = "userId")]
+                pub user_id: i32,
+                pub name: String,
+            }
+        "#;
+        
+        let (structs, _) = super::parse_types_expanded(code, &test_path()).unwrap();
+        assert_eq!(structs.len(), 1, "Should find User struct via serde field attrs");
+        assert_eq!(structs[0].name, "User");
+    }
+
+    #[test]  
+    fn test_parse_types_regular_ignores_without_derive() {
+        // Regular parse_types should NOT find structs without derive
+        let code = r#"
+            pub struct User {
+                #[serde(rename = "userId")]
+                pub user_id: i32,
+            }
+        "#;
+        
+        let (structs, _) = super::parse_types(code, &test_path()).unwrap();
+        assert_eq!(structs.len(), 0, "Regular parse should not find struct without derive");
+    }
+}

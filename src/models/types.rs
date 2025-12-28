@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::RustType;
 
 /// Represents a parsed Rust struct
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustStruct {
     /// Name of the struct
     pub name: String,
@@ -16,7 +16,7 @@ pub struct RustStruct {
 }
 
 /// Represents a struct field
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
     /// Field name
     pub name: String,
@@ -25,18 +25,36 @@ pub struct StructField {
 }
 
 /// Represents a parsed Rust enum
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustEnum {
     /// Name of the enum
     pub name: String,
+    /// Generic type parameters (e.g., ["T", "U"])
+    pub generics: Vec<String>,
     /// Enum variants
     pub variants: Vec<EnumVariant>,
     /// Source file where the enum was found
     pub source_file: PathBuf,
+    /// Serde representation of the enum (External, Internal, Adjacent, Untagged)
+    pub representation: EnumRepresentation,
+}
+
+/// Represents the serde representation of an enum
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum EnumRepresentation {
+    /// default: { "Variant": { ... } }
+    #[default]
+    External,
+    /// #[serde(tag = "type")] -> { "type": "Variant", ... }
+    Internal { tag: String },
+    /// #[serde(tag = "t", content = "c")] -> { "t": "Variant", "c": { ... } }
+    Adjacent { tag: String, content: String },
+    /// #[serde(untagged)] -> { ... }
+    Untagged,
 }
 
 /// Represents an enum variant
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
     /// Variant name
     pub name: String,
@@ -45,7 +63,7 @@ pub struct EnumVariant {
 }
 
 /// Represents the data associated with an enum variant
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VariantData {
     /// Unit variant (no data)
     Unit,
