@@ -32,6 +32,7 @@
 //! }
 //! ```
 
+pub mod cargo_expand;
 pub mod cli;
 pub mod config;
 pub mod generator;

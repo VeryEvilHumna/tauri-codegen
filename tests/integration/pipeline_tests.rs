@@ -12,6 +12,8 @@ fn create_test_config(source_dir: PathBuf, output_dir: PathBuf) -> Config {
         input: InputConfig {
             source_dir,
             exclude: vec!["tests".to_string(), "target".to_string()],
+            use_cargo_expand: false,
+            cargo_manifest: None,
         },
         output: OutputConfig {
             types_file: output_dir.join("types.ts"),
@@ -224,6 +226,8 @@ pub fn get_user(id: i32) -> User {
         input: InputConfig {
             source_dir: src_dir,
             exclude: vec![],
+            use_cargo_expand: false,
+            cargo_manifest: None,
         },
         output: OutputConfig {
             types_file: output_dir.join("types.ts"),

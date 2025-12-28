@@ -20,6 +20,12 @@ pub struct InputConfig {
     /// Directories or files to exclude from scanning
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Use cargo expand to handle macro-generated types (slower but more complete)
+    #[serde(default)]
+    pub use_cargo_expand: bool,
+    /// Cargo manifest path for cargo expand (defaults to Cargo.toml in source_dir parent)
+    #[serde(default)]
+    pub cargo_manifest: Option<PathBuf>,
 }
 
 /// Output configuration - where to write generated TypeScript files
@@ -97,6 +103,8 @@ impl Config {
             input: InputConfig {
                 source_dir: PathBuf::from("src-tauri/src"),
                 exclude: vec!["tests".to_string(), "target".to_string()],
+                use_cargo_expand: false,
+                cargo_manifest: None,
             },
             output: OutputConfig {
                 types_file: PathBuf::from("src/generated/types.ts"),
@@ -285,6 +293,8 @@ commands_file = "commands.ts"
             input: InputConfig {
                 source_dir: PathBuf::from("src"),
                 exclude: vec!["tests".to_string()],
+                use_cargo_expand: false,
+                cargo_manifest: None,
             },
             output: OutputConfig {
                 types_file: PathBuf::from("types.ts"),
