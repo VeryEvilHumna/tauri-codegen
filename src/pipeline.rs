@@ -855,7 +855,7 @@ mod tests {
                 RustEnum {
                     name: "Status".to_string(),
                     generics: vec![],
-                    variants: vec![EnumVariant {
+                    variants: vec![EnumVariant { has_explicit_rename: false,
                         name: "Active".to_string(),
                         data: VariantData::Unit,
                     }],
@@ -934,7 +934,7 @@ mod tests {
                 RustStruct {
                     name: "User".to_string(),
                     generics: vec![],
-                    fields: vec![StructField {
+                    fields: vec![StructField { has_explicit_rename: false,
                         name: "id".to_string(),
                         ty: RustType::Primitive("i32".to_string()),
                     }],
@@ -943,7 +943,7 @@ mod tests {
                 RustStruct {
                     name: "User".to_string(),
                     generics: vec![],
-                    fields: vec![StructField {
+                    fields: vec![StructField { has_explicit_rename: false,
                         name: "name".to_string(),
                         ty: RustType::Primitive("String".to_string()),
                     }],

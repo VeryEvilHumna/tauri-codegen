@@ -18,10 +18,13 @@ pub struct RustStruct {
 /// Represents a struct field
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructField {
-    /// Field name
+    /// Field name (may be renamed via serde)
     pub name: String,
     /// Field type
     pub ty: RustType,
+    /// Whether the name was explicitly set via #[serde(rename = "...")]
+    /// If true, the name should be used as-is without camelCase conversion
+    pub has_explicit_rename: bool,
 }
 
 /// Represents a parsed Rust enum
@@ -56,10 +59,13 @@ pub enum EnumRepresentation {
 /// Represents an enum variant
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
-    /// Variant name
+    /// Variant name (may be renamed via serde)
     pub name: String,
     /// Variant data (for tuple/struct variants)
     pub data: VariantData,
+    /// Whether the name was explicitly set via #[serde(rename = "...")]
+    /// If true, the name should be used as-is without transformation
+    pub has_explicit_rename: bool,
 }
 
 /// Represents the data associated with an enum variant

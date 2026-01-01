@@ -270,11 +270,13 @@ fn parse_struct(item: &ItemStruct, source_file: &Path) -> Option<RustStruct> {
                 let field_type = parse_type_with_context(&field.ty, &generic_params);
 
                 // Check for serde rename attribute
-                let final_name = get_serde_rename(&field.attrs).unwrap_or(field_name);
+                let explicit_rename = get_serde_rename(&field.attrs);
+                let final_name = explicit_rename.clone().unwrap_or(field_name);
 
                 Some(StructField {
                     name: final_name,
                     ty: field_type,
+                    has_explicit_rename: explicit_rename.is_some(),
                 })
             })
             .collect(),
@@ -287,6 +289,7 @@ fn parse_struct(item: &ItemStruct, source_file: &Path) -> Option<RustStruct> {
                 .map(|(i, field)| StructField {
                     name: format!("field{}", i),
                     ty: parse_type_with_context(&field.ty, &generic_params),
+                    has_explicit_rename: false,
                 })
                 .collect()
         }
@@ -347,9 +350,11 @@ fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
             let variant_name = variant.ident.to_string();
 
             // Check for serde rename attribute on variant
-            let final_name = get_serde_rename(&variant.attrs)
+            let explicit_rename = get_serde_rename(&variant.attrs);
+            let final_name = explicit_rename.clone()
                 .or_else(|| apply_rename_all(&variant_name, &container_attrs.rename_all))
-                .unwrap_or(variant_name);
+                .unwrap_or(variant_name.clone());
+            let has_explicit_rename = explicit_rename.is_some() || container_attrs.rename_all.is_some();
 
             let data = match &variant.fields {
                 Fields::Unit => VariantData::Unit,
@@ -367,10 +372,12 @@ fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
                         .iter()
                         .filter_map(|field| {
                             let field_name = field.ident.as_ref()?.to_string();
-                            let final_name = get_serde_rename(&field.attrs).unwrap_or(field_name);
+                            let explicit_rename = get_serde_rename(&field.attrs);
+                            let final_name = explicit_rename.clone().unwrap_or(field_name);
                             Some(StructField {
                                 name: final_name,
                                 ty: parse_type_with_context(&field.ty, &generic_params),
+                                has_explicit_rename: explicit_rename.is_some(),
                             })
                         })
                         .collect();
@@ -381,6 +388,7 @@ fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
             EnumVariant {
                 name: final_name,
                 data,
+                has_explicit_rename,
             }
         })
         .collect();
@@ -687,7 +695,9 @@ mod tests {
 
         let user = &structs[0];
         assert_eq!(user.fields[0].name, "userId");
+        assert!(user.fields[0].has_explicit_rename, "Field with serde rename should have has_explicit_rename = true");
         assert_eq!(user.fields[1].name, "name");
+        assert!(!user.fields[1].has_explicit_rename, "Field without serde rename should have has_explicit_rename = false");
     }
 
     #[test]
@@ -707,7 +717,9 @@ mod tests {
 
         let status = &enums[0];
         assert_eq!(status.variants[0].name, "ACTIVE");
+        assert!(status.variants[0].has_explicit_rename, "Variant with serde rename should have has_explicit_rename = true");
         assert_eq!(status.variants[1].name, "INACTIVE");
+        assert!(status.variants[1].has_explicit_rename, "Variant with serde rename should have has_explicit_rename = true");
     }
 
     #[test]

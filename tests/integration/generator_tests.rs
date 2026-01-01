@@ -154,6 +154,7 @@ fn test_generate_with_naming_prefix() {
         fields: vec![StructField {
             name: "id".to_string(),
             ty: RustType::Primitive("i32".to_string()),
+            has_explicit_rename: false,
         }],
         source_file: PathBuf::from("test.rs"),
     }];
@@ -292,14 +293,17 @@ fn test_snake_case_fields_converted_to_camel_case() {
             StructField {
                 name: "user_id".to_string(),
                 ty: RustType::Primitive("i32".to_string()),
+                has_explicit_rename: false,
             },
             StructField {
                 name: "first_name".to_string(),
                 ty: RustType::Primitive("String".to_string()),
+                has_explicit_rename: false,
             },
             StructField {
                 name: "last_login_at".to_string(),
                 ty: RustType::Primitive("DateTime".to_string()),
+                has_explicit_rename: false,
             },
         ],
         source_file: PathBuf::from("test.rs"),
@@ -331,20 +335,25 @@ fn test_complex_enum_discriminated_union() {
                     StructField {
                         name: "x".to_string(),
                         ty: RustType::Primitive("i32".to_string()),
+                        has_explicit_rename: false,
                     },
                     StructField {
                         name: "y".to_string(),
                         ty: RustType::Primitive("i32".to_string()),
+                        has_explicit_rename: false,
                     },
                 ]),
+                has_explicit_rename: false,
             },
             EnumVariant {
                 name: "KeyPress".to_string(),
                 data: VariantData::Tuple(vec![RustType::Primitive("String".to_string())]),
+                has_explicit_rename: false,
             },
             EnumVariant {
                 name: "Close".to_string(),
                 data: VariantData::Unit,
+                has_explicit_rename: false,
             },
         ],
         source_file: PathBuf::from("test.rs"),
