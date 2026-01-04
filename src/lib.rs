@@ -44,3 +44,7 @@ pub mod resolver;
 pub mod scanner;
 pub mod utils;
 
+// Re-export the TS derive macro for user convenience
+pub use tauri_ts_generator_derive::TS;
+
+

@@ -12,7 +12,8 @@ A powerful CLI tool to automatically generate TypeScript bindings from your Rust
     - Respects `#[serde(rename = "...")]` attributes, preserving the exact name and overriding camelCase conversion.
     - Handles `#[serde(rename_all = "...")]` for enums.
     - Supports `#[serde(tag = "...")]`, `#[serde(content = "...")]`, and `#[serde(untagged)]` enum representations.
-    - Support for `#[ts(undefined)]` attribute on `Option` fields to generate `T | undefined` instead of `T | null`.
+    - Support for `#[ts(optional)]` attribute on `Option` fields to generate `T | undefined` instead of `T | null`.
+    - Provides `#[derive(tauri_ts_generator::TS)]` to register the `ts` attribute namespace.
 - **Smart Type Mapping**:
     - Maps common Rust types (`String`, `Vec`, `Option`, `Result`) to TypeScript equivalents.
     - Handles external crate types like `chrono::DateTime`, `uuid::Uuid`, `url::Url`, and `rust_decimal::Decimal`.
@@ -89,7 +90,7 @@ The generator maps Rust types to TypeScript as follows:
 | `String`, `&str`, `char` | `string` |
 | `i8`...`i64`, `u8`...`u64`, `f32`, `f64` | `number` |
 | `bool` | `boolean` |
-| `Option<T>` | `T \| null` (default), or `T \| undefined` (with `#[ts(undefined)]`) |
+| `Option<T>` | `T \| null` (default), or `T \| undefined` (with `#[ts(optional)]`) |
 | `Vec<T>` | `T[]` |
 | `HashMap<K, V>` | `Record<K, V>` (if K is string/number) |
 | `Result<T, E>` | `Promise<T>` (in return types) |
@@ -191,15 +192,19 @@ export async function updateUser(userId: number, newEmail: string): Promise<void
 ```
 
 ### 5. Option with Undefined
-By default, `Option<T>` maps to `T | null`. You can use the `#[ts(undefined)]` attribute to map it to `T | undefined` instead.
+By default, `Option<T>` maps to `T | null`. You can use the `#[ts(optional)]` attribute to map it to `T | undefined` instead.
+
+> **Note:** You must add `#[derive(tauri_ts_generator::TS)]` to enable the `#[ts(...)]` attribute on your structs.
 
 **Rust:**
 ```rust
-#[derive(Serialize)]
+use tauri_ts_generator::TS;
+
+#[derive(Serialize, TS)]
 pub struct Config {
     pub name: Option<String>,
     
-    #[ts(undefined)]
+    #[ts(optional)]
     pub volume: Option<f32>,
 }
 ```
@@ -208,7 +213,7 @@ pub struct Config {
 ```typescript
 export interface Config {
   name: string | null;      // Default behavior
-  volume: number | undefined; // With #[ts(undefined)]
+  volume: number | undefined; // With #[ts(optional)]
 }
 ```
 

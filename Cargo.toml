@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "tauri-ts-generator-derive"]
+
 [package]
 name = "tauri-ts-generator"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 description = "CLI tool to generate TypeScript bindings from Tauri commands"
 authors = ["kirillinakin <kirillinyakin@yandex.ru>"]
@@ -31,6 +34,9 @@ name = "integration"
 path = "tests/integration/mod.rs"
 
 [dependencies]
+# Derive macro for #[ts(...)] attributes
+tauri-ts-generator-derive = { path = "tauri-ts-generator-derive" }
+
 # Rust AST parsing
 syn = { version = "2.0", features = ["full", "parsing", "extra-traits"] }
 

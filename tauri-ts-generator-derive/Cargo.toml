@@ -1,0 +1,16 @@
+[package]
+name = "tauri-ts-generator-derive"
+version = "0.1.0"
+edition = "2021"
+description = "Derive macro for tauri-ts-generator to enable #[ts(...)] attributes"
+authors = ["kirillinakin <kirillinyakin@yandex.ru>"]
+repository = "https://github.com/Dudude-bit/tauri-codegen"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"

@@ -26,8 +26,8 @@ pub struct StructField {
     /// If true, the name should be used as-is without camelCase conversion
     pub has_explicit_rename: bool,
     /// Whether to use undefined instead of null for Option types
-    /// Set via #[ts(undefined)] attribute
-    pub use_undefined: bool,
+    /// Set via #[ts(optional)] attribute
+    pub use_optional: bool,
 }
 
 /// Represents a parsed Rust enum
