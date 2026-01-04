@@ -273,10 +273,14 @@ fn parse_struct(item: &ItemStruct, source_file: &Path) -> Option<RustStruct> {
                 let explicit_rename = get_serde_rename(&field.attrs);
                 let final_name = explicit_rename.clone().unwrap_or(field_name);
 
+                // Check for #[ts(undefined)] attribute
+                let use_undefined = has_ts_undefined(&field.attrs, &field_type);
+
                 Some(StructField {
                     name: final_name,
                     ty: field_type,
                     has_explicit_rename: explicit_rename.is_some(),
+                    use_undefined,
                 })
             })
             .collect(),
@@ -290,6 +294,7 @@ fn parse_struct(item: &ItemStruct, source_file: &Path) -> Option<RustStruct> {
                     name: format!("field{}", i),
                     ty: parse_type_with_context(&field.ty, &generic_params),
                     has_explicit_rename: false,
+                    use_undefined: false,
                 })
                 .collect()
         }
@@ -372,12 +377,15 @@ fn parse_enum(item: &ItemEnum, source_file: &Path) -> Option<RustEnum> {
                         .iter()
                         .filter_map(|field| {
                             let field_name = field.ident.as_ref()?.to_string();
+                            let field_type = parse_type_with_context(&field.ty, &generic_params);
                             let explicit_rename = get_serde_rename(&field.attrs);
                             let final_name = explicit_rename.clone().unwrap_or(field_name);
+                            let use_undefined = has_ts_undefined(&field.attrs, &field_type);
                             Some(StructField {
                                 name: final_name,
-                                ty: parse_type_with_context(&field.ty, &generic_params),
+                                ty: field_type,
                                 has_explicit_rename: explicit_rename.is_some(),
+                                use_undefined,
                             })
                         })
                         .collect();
@@ -427,6 +435,35 @@ fn get_serde_rename(attrs: &[syn::Attribute]) -> Option<String> {
         }
     }
     None
+}
+
+/// Check if a field has #[ts(undefined)] attribute and validate it's on Option<T>
+fn has_ts_undefined(attrs: &[syn::Attribute], ty: &crate::models::RustType) -> bool {
+    for attr in attrs {
+        if let Meta::List(meta_list) = &attr.meta {
+            if meta_list.path.is_ident("ts") {
+                if let Ok(nested) = meta_list.parse_args_with(
+                    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+                ) {
+                    for meta in nested {
+                        if let Meta::Path(path) = meta {
+                            if path.is_ident("undefined") {
+                                // Validate that the type is Option<T>
+                                if matches!(ty, crate::models::RustType::Option(_)) {
+                                    return true;
+                                } else {
+                                    eprintln!(
+                                        "Warning: #[ts(undefined)] is only valid on Option<T> fields, ignoring"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Parse serde container attributes (rename_all, etc.)
@@ -505,6 +542,77 @@ mod tests {
     fn test_path() -> PathBuf {
         PathBuf::from("test.rs")
     }
+
+    #[test]
+    fn test_parse_ts_undefined_attribute() {
+        let code = r#"
+            #[derive(Serialize)]
+            pub struct Config {
+                #[ts(undefined)]
+                pub volume: Option<f32>,
+                pub name: Option<String>,
+            }
+        "#;
+
+        let (structs, _) = parse_types(code, &test_path()).unwrap();
+        assert_eq!(structs.len(), 1);
+        let config = &structs[0];
+
+        assert_eq!(config.fields[0].name, "volume");
+        assert!(config.fields[0].use_undefined, "Option field with #[ts(undefined)] should have use_undefined=true");
+        
+        assert_eq!(config.fields[1].name, "name");
+        assert!(!config.fields[1].use_undefined, "Option field without attribute should have use_undefined=false");
+    }
+
+    #[test]
+    fn test_parse_ts_undefined_ignored_on_non_option() {
+        // This should print a warning but not fail
+        let code = r#"
+            #[derive(Serialize)]
+            pub struct Config {
+                #[ts(undefined)]
+                pub count: i32,
+            }
+        "#;
+
+        let (structs, _) = parse_types(code, &test_path()).unwrap();
+        assert_eq!(structs.len(), 1);
+        let config = &structs[0];
+
+        assert_eq!(config.fields[0].name, "count");
+        assert!(!config.fields[0].use_undefined, "Non-Option field should ignore ts(undefined)");
+    }
+
+    #[test]
+    fn test_parse_ts_undefined_on_struct_variant() {
+        let code = r#"
+            #[derive(Serialize)]
+            pub enum Settings {
+                Network {
+                    #[ts(undefined)]
+                    proxy: Option<String>,
+                    port: i32,
+                }
+            }
+        "#;
+
+        let (_, enums) = parse_types(code, &test_path()).unwrap();
+        assert_eq!(enums.len(), 1);
+        let settings = &enums[0];
+        
+        match &settings.variants[0].data {
+            VariantData::Struct(fields) => {
+                assert_eq!(fields[0].name, "proxy");
+                assert!(fields[0].use_undefined);
+                assert_eq!(fields[1].name, "port");
+                assert!(!fields[1].use_undefined);
+            },
+            _ => panic!("Expected Struct variant"),
+        }
+    }
+
+
 
     #[test]
     fn test_parse_simple_struct() {

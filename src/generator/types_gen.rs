@@ -49,7 +49,16 @@ fn generate_interface(s: &RustStruct, ctx: &GeneratorContext) -> String {
     ));
 
     for field in &s.fields {
-        let ts_type = rust_to_typescript(&field.ty, ctx);
+        // If use_undefined is true and type is Option<T>, generate T | undefined
+        let ts_type = if field.use_undefined {
+            if let crate::models::RustType::Option(inner) = &field.ty {
+                format!("{} | undefined", rust_to_typescript(inner, ctx))
+            } else {
+                rust_to_typescript(&field.ty, ctx)
+            }
+        } else {
+            rust_to_typescript(&field.ty, ctx)
+        };
         // If serde rename was explicitly set, use the name as-is
         // Otherwise, convert to camelCase
         let field_name = if field.has_explicit_rename {
@@ -173,7 +182,16 @@ fn generate_variant(
 fn generate_struct_body(fields: &[crate::models::StructField], ctx: &GeneratorContext) -> String {
     let mut params = Vec::new();
     for field in fields {
-        let ts_type = rust_to_typescript(&field.ty, ctx);
+        // If use_undefined is true and type is Option<T>, generate T | undefined
+        let ts_type = if field.use_undefined {
+            if let crate::models::RustType::Option(inner) = &field.ty {
+                format!("{} | undefined", rust_to_typescript(inner, ctx))
+            } else {
+                rust_to_typescript(&field.ty, ctx)
+            }
+        } else {
+            rust_to_typescript(&field.ty, ctx)
+        };
         // If serde rename was explicitly set, use the name as-is
         // Otherwise, convert to camelCase
         let field_name = if field.has_explicit_rename {
@@ -207,11 +225,11 @@ mod tests {
             name: "User".to_string(),
             generics: vec![],
             fields: vec![
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "id".to_string(),
                     ty: RustType::Primitive("i32".to_string()),
                 },
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "name".to_string(),
                     ty: RustType::Primitive("String".to_string()),
                 },
@@ -233,11 +251,11 @@ mod tests {
             name: "Wrapper".to_string(),
             generics: vec!["T".to_string()],
             fields: vec![
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "data".to_string(),
                     ty: RustType::Generic("T".to_string()),
                 },
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "count".to_string(),
                     ty: RustType::Primitive("i32".to_string()),
                 },
@@ -259,11 +277,11 @@ mod tests {
             name: "Pair".to_string(),
             generics: vec!["K".to_string(), "V".to_string()],
             fields: vec![
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "key".to_string(),
                     ty: RustType::Generic("K".to_string()),
                 },
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "value".to_string(),
                     ty: RustType::Generic("V".to_string()),
                 },
@@ -345,7 +363,7 @@ mod tests {
             variants: vec![
                 EnumVariant { has_explicit_rename: false,
                     name: "Admin".to_string(),
-                    data: VariantData::Struct(vec![StructField { has_explicit_rename: false,
+                    data: VariantData::Struct(vec![StructField { has_explicit_rename: false, use_undefined: false,
                         name: "permissions".to_string(),
                         ty: RustType::Vec(Box::new(RustType::Primitive("String".to_string()))),
                     }]),
@@ -373,11 +391,11 @@ mod tests {
             name: "User".to_string(),
             generics: vec![],
             fields: vec![
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "user_id".to_string(),
                     ty: RustType::Primitive("i32".to_string()),
                 },
-                StructField { has_explicit_rename: false,
+                StructField { has_explicit_rename: false, use_undefined: false,
                     name: "first_name".to_string(),
                     ty: RustType::Primitive("String".to_string()),
                 },
@@ -422,7 +440,7 @@ mod tests {
             RustStruct {
                 name: "User".to_string(),
                 generics: vec![],
-                fields: vec![StructField { has_explicit_rename: false,
+                fields: vec![StructField { has_explicit_rename: false, use_undefined: false,
                     name: "id".to_string(),
                     ty: RustType::Primitive("i32".to_string()),
                 }],
@@ -431,7 +449,7 @@ mod tests {
             RustStruct {
                 name: "Item".to_string(),
                 generics: vec![],
-                fields: vec![StructField { has_explicit_rename: false,
+                fields: vec![StructField { has_explicit_rename: false, use_undefined: false,
                     name: "name".to_string(),
                     ty: RustType::Primitive("String".to_string()),
                 }],
@@ -465,7 +483,7 @@ mod tests {
         let s = RustStruct {
             name: "User".to_string(),
             generics: vec![],
-            fields: vec![StructField { has_explicit_rename: false,
+            fields: vec![StructField { has_explicit_rename: false, use_undefined: false,
                 name: "email".to_string(),
                 ty: RustType::Option(Box::new(RustType::Primitive("String".to_string()))),
             }],
@@ -483,7 +501,7 @@ mod tests {
         let s = RustStruct {
             name: "User".to_string(),
             generics: vec![],
-            fields: vec![StructField { has_explicit_rename: false,
+            fields: vec![StructField { has_explicit_rename: false, use_undefined: false,
                 name: "tags".to_string(),
                 ty: RustType::Vec(Box::new(RustType::Primitive("String".to_string()))),
             }],
@@ -527,16 +545,19 @@ mod tests {
                     name: "user_name".to_string(), // Should become userName
                     ty: RustType::Primitive("String".to_string()),
                     has_explicit_rename: false,
+                    use_undefined: false,
                 },
                 StructField {
                     name: "API_KEY".to_string(), // Should succeed as API_KEY
                     ty: RustType::Primitive("String".to_string()),
                     has_explicit_rename: true, // Simulate #[serde(rename = "API_KEY")]
+                    use_undefined: false,
                 },
                 StructField {
                     name: "snake_case_kept".to_string(), // Should fail check if it was converted
                     ty: RustType::Primitive("bool".to_string()),
                     has_explicit_rename: true, // Simulate #[serde(rename = "snake_case_kept")]
+                    use_undefined: false,
                 },
             ],
             source_file: test_path(),
@@ -594,11 +615,13 @@ mod tests {
                             name: "user_id".to_string(),
                             ty: RustType::Primitive("i32".to_string()),
                             has_explicit_rename: false, // Normal conversion -> userId
+                            use_undefined: false,
                         },
                         StructField {
                             name: "TIMESTAMP".to_string(),
                             ty: RustType::Primitive("i64".to_string()),
                             has_explicit_rename: true, // Kept as TIMESTAMP
+                            use_undefined: false,
                         },
                     ]),
                     has_explicit_rename: false,
@@ -614,5 +637,34 @@ mod tests {
         assert!(output.contains("userId: number"));
         assert!(output.contains("TIMESTAMP: number"));
         assert!(!output.contains("timestamp: number"));
+    }
+
+    #[test]
+    fn test_generate_ts_undefined_field() {
+        let s = RustStruct {
+            name: "Config".to_string(),
+            generics: vec![],
+            fields: vec![
+                StructField {
+                    name: "volume".to_string(),
+                    ty: RustType::Option(Box::new(RustType::Primitive("f32".to_string()))),
+                    has_explicit_rename: false,
+                    use_undefined: true,
+                },
+                StructField {
+                    name: "name".to_string(),
+                    ty: RustType::Option(Box::new(RustType::Primitive("String".to_string()))),
+                    has_explicit_rename: false,
+                    use_undefined: false,
+                },
+            ],
+            source_file: test_path(),
+        };
+
+        let ctx = default_ctx();
+        let output = generate_interface(&s, &ctx);
+
+        assert!(output.contains("volume: number | undefined"));
+        assert!(output.contains("name: string | null"));
     }
 }
